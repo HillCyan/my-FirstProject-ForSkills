@@ -2,8 +2,4 @@
 而像.teae\skills里的只能由trae用
 mySkills里只是存储skill，想用必须放到上述文件夹里
 调用skill-security(初始来自https://github.com/Damond-Fung/skills-security)里的main.py能够静态检测skill的风险；如：python D:\ForSkills\skills-security\main.py D:\ForSkills\mySkills\a-demo3
-<<<<<<< HEAD
 	或者用LLM检测：python D:\ForSkills\skills-security\main.py D:\ForSkills\mySkills\泄露隐私skill --llm --provider deepseek（可以是其他模型，比如交大超算中心的就换成sjtu） --api-key （sk-abc123xyz456）（括号内用自己的api-key）
-=======
-	或者用LLM检测：python D:\ForSkills\skills-security\main.py D:\ForSkills\mySkills\泄露隐私skill --llm --provider deepseek（可以是其他模型，比如交大超算中心的就换成sjtu） --api-key （sk-abc123xyz456）（括号内用自己的api-key）
->>>>>>> 1a29580bd64bb5b9ccb376bcee7c2c6f9a6635c8
