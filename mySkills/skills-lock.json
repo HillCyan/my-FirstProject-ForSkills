@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "a-demo": {
+      "source": "D:\\ForSkills\\mySkills\\a-demo",
+      "sourceType": "local",
+      "computedHash": "f978f2edea559ec506846f85b4b12dca398acdb12c33768dc1c21294887af9b9"
+    }
+  }
+}

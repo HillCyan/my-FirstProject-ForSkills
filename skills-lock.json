@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "skills": {
+    "a-demo": {
+      "source": "D:\\ForSkills\\mySkills\\a-demo",
+      "sourceType": "local",
+      "computedHash": "f978f2edea559ec506846f85b4b12dca398acdb12c33768dc1c21294887af9b9"
+    },
+    "a-demo2": {
+      "source": "D:\\ForSkills\\mySkills\\a-demo2",
+      "sourceType": "local",
+      "computedHash": "8836ddce302b417df62574bfdb234678a7bcb509f6ad946dc4d98b14c005f435"
+    },
+    "skilltester": {
+      "source": "skilltester.ai",
+      "sourceType": "well-known",
+      "computedHash": "15326d2e93e66a6d1ed96a53e361740b1360d7cecb18daeb02a535dd09f9ed2b"
+    }
+  }
+}
