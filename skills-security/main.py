@@ -605,6 +605,88 @@ CHECK_ITEMS = [
         "regex": re.compile(r"(请|帮我|让|要求).{0,10}(提供|获取|显示).{0,10}(密码|口令|pin码|验证码)", re.I),
         "message": "检测到要求获取凭证的自然语言指令",
         "remediation": "Skill不应要求获取用户密码等凭证"
+    },
+
+    # ===== 软性越权 / 诱导话术（易漏检的灰区）=====
+    {
+        "code": "NL_SOFT_TRUST",
+        "name": "自然语言-盲目信任诱导",
+        "severity": "medium",
+        "regex": re.compile(r"(信任我|相信我|不要怀疑|尽管放心|我保证(安全|无害)|不会外传[（(]?信任)", re.I),
+        "message": "检测到诱导盲目信任的自然语言话术",
+        "remediation": "Skill不应要求用户或 Agent 无条件信任其行为"
+    },
+    {
+        "code": "NL_EXPAND_PERMISSION",
+        "name": "自然语言-扩大权限请求",
+        "severity": "high",
+        "regex": re.compile(
+            r"(不要|别|请勿|无需|不用).{0,10}(限制|约束|缩小).{0,10}(权限|能力|工具)|"
+            r"(需要|要求|请给).{0,10}(全部|所有|完整|无限|最大).{0,10}(权限|访问)|"
+            r"请不要限制工具的权限",
+            re.I,
+        ),
+        "message": "检测到要求扩大或取消权限限制的自然语言指令",
+        "remediation": "Skill应遵循最小权限，不应要求放开全部权限"
+    },
+    {
+        "code": "NL_DISABLE_GUARDRAIL",
+        "name": "自然语言-关闭安全护栏",
+        "severity": "high",
+        "regex": re.compile(r"(关闭|取消|去掉|解除|移除).{0,10}(安全|权限).{0,8}(限制|护栏|约束|检查|校验)", re.I),
+        "message": "检测到要求关闭安全护栏的自然语言指令",
+        "remediation": "Skill不应要求关闭安全限制或护栏"
+    },
+
+    # ===== 代码混淆可疑模式 =====
+    {
+        "code": "OBFUSCATION_ATOB",
+        "name": "编码混淆-atob/Base64",
+        "severity": "medium",
+        "regex": re.compile(r"\batob\s*\(|Buffer\.from\s*\([^)]*?,\s*['\"]base64['\"]", re.I),
+        "message": "检测到 Base64/atob 解码，可能用于隐藏恶意载荷",
+        "remediation": "避免用编码隐藏 URL 或命令；改为明文并说明用途"
+    },
+    {
+        "code": "OBFUSCATION_EVAL_BUILD",
+        "name": "编码混淆-动态构造eval",
+        "severity": "high",
+        "regex": re.compile(
+            r"""['\"]e['\"]\s*\+\s*['\"]v['\"]\s*\+\s*['\"]a['\"]\s*\+\s*['\"]l['\"]|"""
+            r"""\[['\"]e['\"],\s*['\"]v['\"],\s*['\"]a['\"],\s*['\"]l['\"]\]""",
+            re.I,
+        ),
+        "message": "检测到通过字符串拼接构造 eval",
+        "remediation": "禁止动态拼接 eval；使用显式、可审计的调用"
+    },
+    {
+        "code": "OBFUSCATION_CMD_BUILD",
+        "name": "编码混淆-动态构造危险命令",
+        "severity": "high",
+        "regex": re.compile(
+            r"""['\"]r['\"]\s*\+\s*['\"]m['\"].{0,60}['\"]f['\"]|"""
+            r"""dangerousCmd\s*=|"""
+            r"""['\"]rm['\"]\s*\+\s*['\"]\s*-?rf['\"]""",
+            re.I,
+        ),
+        "message": "检测到通过拼接构造危险删除命令",
+        "remediation": "禁止动态拼接破坏性命令"
+    },
+    {
+        "code": "OBFUSCATION_HEX_STRING",
+        "name": "编码混淆-十六进制/Unicode字符串",
+        "severity": "medium",
+        "regex": re.compile(r"(\\x[0-9a-fA-F]{2}){6,}|(\\u[0-9a-fA-F]{4}){4,}"),
+        "message": "检测到较长的十六进制/Unicode 编码字符串，可能用于隐藏密钥或载荷",
+        "remediation": "避免用转义编码隐藏敏感字符串；改为配置注入"
+    },
+    {
+        "code": "SILENT_CATCH",
+        "name": "静默吞错检测",
+        "severity": "low",
+        "regex": re.compile(r"catch\s*\([^)]*\)\s*\{[^}]{0,120}(静默|swallow|ignore\s+error|pass\s*$)", re.I | re.M),
+        "message": "检测到可能用于隐藏失败的静默 catch",
+        "remediation": "错误应记录或上抛，避免空 catch 掩盖恶意行为"
     }
 ]
 
@@ -741,6 +823,9 @@ RULE_PRIVACY_TYPE = {
     "NL_PRIVILEGE_ESCALATE": "security",
     "NL_IMPERSONATE": "security",
     "NL_WEIRD_INSTRUCTION": "security",
+    "NL_SOFT_TRUST": "security",
+    "NL_EXPAND_PERMISSION": "security",
+    "NL_DISABLE_GUARDRAIL": "security",
     
     # 其他风险
     "CMD_RM_RF": "other",
@@ -755,7 +840,72 @@ RULE_PRIVACY_TYPE = {
     "NL_DECODE_EXEC": "other",
     "NL_COMPLETE_OUTPUT": "other",
     "NL_IGNORE_ERROR": "other",
+    "OBFUSCATION_ATOB": "other",
+    "OBFUSCATION_EVAL_BUILD": "other",
+    "OBFUSCATION_CMD_BUILD": "other",
+    "OBFUSCATION_HEX_STRING": "other",
+    "SILENT_CATCH": "other",
 }
+
+# 强制标为 suspicious 的规则（易误报或需二次确认）
+FORCE_SUSPICIOUS_CODES = {
+    "HTTP_INSECURE",
+    "NL_COMPLETE_OUTPUT",
+    "NL_IGNORE_ERROR",
+    "IGNORE_PERMISSION",
+    "PROCESS_ENV_DUMP",
+    "NL_FILE_LIST",
+    "GOV_CLASSIFIED",
+    "GOV_DOCUMENT",
+    "PII_EDUCATION",
+    "PII_OCCUPATION",
+    "NL_SCREEN_CAPTURE",
+    "NL_SOFT_TRUST",
+    "NL_EXPAND_PERMISSION",
+    "NL_DISABLE_GUARDRAIL",
+    "OBFUSCATION_ATOB",
+    "OBFUSCATION_HEX_STRING",
+    "SILENT_CATCH",
+}
+
+# 明确恶意模式：直接 confirmed
+FORCE_CONFIRMED_CODES = {
+    "CMD_RM_RF",
+    "DYN_EVAL",
+    "HARDCODED_SECRET",
+    "SSH_KEY_EXPOSE",
+    "AWS_CREDENTIALS",
+    "GCP_CREDENTIALS",
+    "DB_CREDENTIALS",
+    "NL_ENV_DUMP_REQUEST",
+    "NL_SECRET_REQUEST",
+    "NL_FILE_EXFIL",
+    "NL_DATA_EXFIL",
+    "NL_EXEC_COMMAND",
+    "NL_DECODE_EXEC",
+    "OBFUSCATION_EVAL_BUILD",
+    "OBFUSCATION_CMD_BUILD",
+    "JWT_SECRET",
+    "OAUTH_SECRET",
+    "ENCRYPTION_KEY",
+}
+
+FAKE_VALUE_RE = re.compile(
+    r"fake[-_]|example\.com|placeholder|your[-_]?api[-_]?key|changeme|"
+    r"dummy|not[-_]?a[-_]?real|xxx{2,}|sk-fake|LTAI-FAKE|test[-_]?key",
+    re.I,
+)
+HTTP_SAFE_HOST_RE = re.compile(
+    r"https?://("
+    r"localhost|127\.0\.0\.1|0\.0\.0\.0|"
+    r"([\w-]+\.)?example\.com|"
+    r"fake[-_][\w.-]+|"
+    r"[\w.-]*\.local"
+    r")",
+    re.I,
+)
+CONFIDENCE_ZH = {"confirmed": "确定", "suspicious": "可疑"}
+VERDICT_ZH = {"allow": "放行", "review": "人工复核", "block": "阻断"}
 
 
 def get_privacy_type(rule_code: str) -> str:
@@ -767,6 +917,239 @@ def get_privacy_type_zh(rule_code: str) -> str:
     """获取规则对应的隐私类型中文名"""
     privacy_type = get_privacy_type(rule_code)
     return PRIVACY_TYPE_ZH.get(privacy_type, "其他风险")
+
+
+def get_confidence(rule_code: str, severity: str) -> str:
+    """规则置信度：confirmed / suspicious"""
+    if rule_code in FORCE_CONFIRMED_CODES:
+        return "confirmed"
+    if rule_code in FORCE_SUSPICIOUS_CODES:
+        return "suspicious"
+    return "confirmed" if severity == "high" else "suspicious"
+
+
+def extract_snippet(content: str, match: re.Match, radius: int = 80) -> str:
+    start = max(0, match.start() - radius)
+    end = min(len(content), match.end() + radius)
+    snippet = content[start:end].replace("\n", " ").strip()
+    if start > 0:
+        snippet = "…" + snippet
+    if end < len(content):
+        snippet = snippet + "…"
+    return snippet
+
+
+def is_false_positive(item: Dict[str, Any], match: re.Match, content: str, file_path: Path) -> bool:
+    """基于上下文的误报过滤（不整文件屏蔽测试 Skill）"""
+    path_norm = str(file_path).replace("\\", "/").lower()
+    if "/fixtures/" in path_norm:
+        return True
+
+    matched = match.group(0)
+    window = content[max(0, match.start() - 120): min(len(content), match.end() + 120)]
+
+    if item["code"] == "HTTP_INSECURE":
+        url_window = content[match.start(): min(len(content), match.end() + 120)]
+        if HTTP_SAFE_HOST_RE.search(url_window) or FAKE_VALUE_RE.search(url_window):
+            return True
+        return False
+
+    # 混淆类规则不因注释里的 fake 字样而放过
+    if item["code"].startswith("OBFUSCATION_") or item["code"] in {
+        "NL_SOFT_TRUST",
+        "NL_EXPAND_PERMISSION",
+        "NL_DISABLE_GUARDRAIL",
+        "SILENT_CATCH",
+    }:
+        return False
+
+    # 命中值或邻近窗口明显是占位/示例数据（仅针对明文密钥/PII 类）
+    if FAKE_VALUE_RE.search(matched) or FAKE_VALUE_RE.search(window):
+        secret_like = (
+            item["code"].startswith("PII_")
+            or item["code"].endswith("_SECRET")
+            or item["code"].endswith("_CREDENTIALS")
+            or item["code"] in {
+                "HARDCODED_SECRET",
+                "DB_CREDENTIALS",
+                "SENSITIVE_FILE_ACCESS",
+            }
+        )
+        if secret_like:
+            return True
+
+    return False
+
+
+def decide_verdict(findings: List[Dict[str, Any]]) -> str:
+    """统一结论：allow / review / block"""
+    if not findings:
+        return "allow"
+    if any(f.get("confidence") == "confirmed" and f.get("risk") == "high" for f in findings):
+        return "block"
+    if any(f.get("confidence") in {"confirmed", "suspicious"} for f in findings):
+        return "review"
+    return "allow"
+
+
+PRIVACY_FOCUS_TYPES = ("personal", "government", "system")
+PRIVACY_FOCUS_LABEL = {
+    "personal": "个人隐私",
+    "government": "国家隐私",
+    "system": "系统凭证/隐私",
+}
+
+
+def build_privacy_leak_report(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """专门汇总隐私泄露（确定 / 疑似），聚焦个人隐私与国家隐私。"""
+    buckets = {
+        key: {
+            "label": PRIVACY_FOCUS_LABEL[key],
+            "confirmed": [],
+            "suspicious": [],
+            "confirmed_count": 0,
+            "suspicious_count": 0,
+        }
+        for key in PRIVACY_FOCUS_TYPES
+    }
+
+    for item in findings:
+        ptype = item.get("privacy_type")
+        if ptype not in buckets:
+            continue
+        entry = {
+            "check_code": item.get("check_code"),
+            "check_name": item.get("check_name"),
+            "risk": item.get("risk"),
+            "risk_zh": to_severity_zh(item.get("risk", "low")),
+            "file": item.get("file"),
+            "line_hint": item.get("line_hint"),
+            "message": item.get("message"),
+            "evidence": item.get("evidence"),
+            "matched_text": item.get("matched_text"),
+            "confidence": item.get("confidence"),
+            "confidence_zh": item.get("confidence_zh") or CONFIDENCE_ZH.get(item.get("confidence", ""), ""),
+        }
+        conf = item.get("confidence", "suspicious")
+        if conf == "confirmed":
+            buckets[ptype]["confirmed"].append(entry)
+        else:
+            buckets[ptype]["suspicious"].append(entry)
+
+    for key in buckets:
+        buckets[key]["confirmed_count"] = len(buckets[key]["confirmed"])
+        buckets[key]["suspicious_count"] = len(buckets[key]["suspicious"])
+
+    personal_c = buckets["personal"]["confirmed_count"]
+    personal_s = buckets["personal"]["suspicious_count"]
+    gov_c = buckets["government"]["confirmed_count"]
+    gov_s = buckets["government"]["suspicious_count"]
+    system_c = buckets["system"]["confirmed_count"]
+    system_s = buckets["system"]["suspicious_count"]
+
+    has_any = any(
+        buckets[k]["confirmed_count"] + buckets[k]["suspicious_count"] > 0
+        for k in PRIVACY_FOCUS_TYPES
+    )
+
+    highlights = []
+    if personal_c or personal_s:
+        highlights.append(
+            f"个人隐私：确定泄露 {personal_c} 项，疑似泄露 {personal_s} 项"
+        )
+    if gov_c or gov_s:
+        highlights.append(
+            f"国家隐私：确定泄露 {gov_c} 项，疑似泄露 {gov_s} 项"
+        )
+    if system_c or system_s:
+        highlights.append(
+            f"系统凭证/隐私：确定泄露 {system_c} 项，疑似泄露 {system_s} 项"
+        )
+    if not highlights:
+        highlights.append("未发现个人隐私、国家隐私或系统凭证类泄露（含疑似）")
+
+    return {
+        "has_privacy_leak": has_any,
+        "highlights": highlights,
+        "summary": "【隐私专项】" + "；".join(highlights) + "。",
+        "personal": buckets["personal"],
+        "government": buckets["government"],
+        "system": buckets["system"],
+        "totals": {
+            "personal_confirmed": personal_c,
+            "personal_suspicious": personal_s,
+            "government_confirmed": gov_c,
+            "government_suspicious": gov_s,
+            "system_confirmed": system_c,
+            "system_suspicious": system_s,
+        },
+    }
+
+
+def build_summary(findings: List[Dict[str, Any]], risk_counts: Dict[str, int], verdict: str) -> str:
+    conf_counts = {"confirmed": 0, "suspicious": 0}
+    for item in findings:
+        conf = item.get("confidence", "suspicious")
+        conf_counts[conf] = conf_counts.get(conf, 0) + 1
+    return (
+        f"结论={VERDICT_ZH.get(verdict, verdict)}({verdict})；"
+        f"高危{risk_counts['high']} / 中危{risk_counts['medium']} / 低危{risk_counts['low']}；"
+        f"确定命中{conf_counts['confirmed']} / 可疑命中{conf_counts['suspicious']}。"
+        + (
+            " 建议阻断或拒绝安装。"
+            if verdict == "block"
+            else " 建议人工复核或启用 LLM 灰区裁定。"
+            if verdict == "review"
+            else " 未发现需处理风险。"
+        )
+    )
+
+
+def build_privacy_summary(findings: List[Dict[str, Any]] = None, privacy_report: Dict[str, Any] = None) -> str:
+    """仅用于隐私专项检测的摘要文案。"""
+    report = privacy_report or build_privacy_leak_report(findings or [])
+    return report.get("summary") or ("【隐私专项】" + "；".join(report.get("highlights", [])) + "。")
+
+
+def apply_llm_reviews(findings: List[Dict[str, Any]], llm_result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """根据 LLM 对 suspicious 项的裁定更新 findings"""
+    reviews = llm_result.get("reviews") if isinstance(llm_result, dict) else None
+    if not reviews:
+        return findings
+
+    review_map = {}
+    for rev in reviews:
+        key = (rev.get("check_code"), rev.get("file"))
+        review_map[key] = rev
+
+    updated = []
+    for finding in findings:
+        item = dict(finding)
+        if item.get("confidence") != "suspicious":
+            updated.append(item)
+            continue
+        rev = review_map.get((item.get("check_code"), item.get("file")))
+        if not rev:
+            # 兼容只按 check_code 匹配
+            rev = next(
+                (r for r in reviews if r.get("check_code") == item.get("check_code")),
+                None,
+            )
+        if not rev:
+            updated.append(item)
+            continue
+        decision = str(rev.get("decision", "")).lower().strip()
+        item["llm_decision"] = decision
+        item["llm_reason"] = rev.get("reason", "")
+        if decision == "confirm":
+            item["confidence"] = "confirmed"
+        elif decision == "dismiss":
+            continue  # 误报剔除
+        elif decision == "escalate":
+            item["confidence"] = "suspicious"
+            item["escalated"] = True
+        updated.append(item)
+    return updated
 
 
 def iter_files(root: Path):
@@ -939,6 +1322,7 @@ def detect_skills(skills_dir: Path):
 def assess(skills_dir: Path):
     findings = []
     scanned = 0
+    suppressed = 0
     for file_path in iter_files(skills_dir):
         scanned += 1
         try:
@@ -946,28 +1330,44 @@ def assess(skills_dir: Path):
         except OSError:
             continue
         for item in CHECK_ITEMS:
-            if item["regex"].search(content):
+            for match in item["regex"].finditer(content):
+                if is_false_positive(item, match, content, file_path):
+                    suppressed += 1
+                    continue
                 privacy_type = get_privacy_type(item["code"])
+                confidence = get_confidence(item["code"], item["severity"])
                 findings.append(
                     {
                         "file": str(file_path),
                         "risk": item["severity"],
+                        "confidence": confidence,
+                        "confidence_zh": CONFIDENCE_ZH.get(confidence, confidence),
                         "check_code": item["code"],
                         "check_name": item["name"],
                         "message": item["message"],
                         "remediation": item["remediation"],
                         "privacy_type": privacy_type,
-                        "privacy_type_zh": PRIVACY_TYPE_ZH.get(privacy_type, "其他风险")
+                        "privacy_type_zh": PRIVACY_TYPE_ZH.get(privacy_type, "其他风险"),
+                        "matched_text": match.group(0)[:200],
+                        "evidence": extract_snippet(content, match),
+                        "line_hint": content.count("\n", 0, match.start()) + 1,
                     }
                 )
     risk_counts = {"high": 0, "medium": 0, "low": 0}
+    confidence_counts = {"confirmed": 0, "suspicious": 0}
     privacy_counts = {"system": 0, "personal": 0, "government": 0, "security": 0, "other": 0}
     for item in findings:
         risk_counts[item["risk"]] += 1
+        confidence_counts[item["confidence"]] = confidence_counts.get(item["confidence"], 0) + 1
         privacy_counts[item["privacy_type"]] += 1
     triggered_codes = {item["check_code"] for item in findings}
     detection_items = [
-        {"code": item["code"], "name": item["name"], "severity": item["severity"]}
+        {
+            "code": item["code"],
+            "name": item["name"],
+            "severity": item["severity"],
+            "confidence": get_confidence(item["code"], item["severity"]),
+        }
         for item in CHECK_ITEMS
         if item["code"] in triggered_codes
     ]
@@ -981,16 +1381,25 @@ def assess(skills_dir: Path):
                 "check_name": item["check_name"],
                 "advice": item["remediation"],
                 "privacy_type": item["privacy_type"],
-                "privacy_type_zh": item["privacy_type_zh"]
+                "privacy_type_zh": item["privacy_type_zh"],
+                "confidence": item["confidence"],
             }
     remediation = sorted(remediation_map.values(), key=lambda x: severity_rank[x["severity"]])
+    verdict = decide_verdict(findings)
+    privacy_leak_report = build_privacy_leak_report(findings)
     return {
         "scanned_files": scanned,
+        "suppressed_false_positives": suppressed,
         "findings": findings,
         "risk_counts": risk_counts,
+        "confidence_counts": confidence_counts,
         "privacy_counts": privacy_counts,
+        "privacy_leak_report": privacy_leak_report,
         "detection_items": detection_items,
-        "remediation": remediation
+        "remediation": remediation,
+        "verdict": verdict,
+        "verdict_zh": VERDICT_ZH.get(verdict, verdict),
+        "summary": build_summary(findings, risk_counts, verdict),
     }
 
 
@@ -1001,6 +1410,7 @@ def to_safe_filename(value: str):
 def build_markdown_report(result, skills_dir: Path):
     risk = result["risk_counts"]
     privacy = result.get("privacy_counts", {})
+    conf = result.get("confidence_counts", {})
     skills = result["skill_basic_info"]
     lines = [
         "# skills-security 评估报告",
@@ -1008,10 +1418,57 @@ def build_markdown_report(result, skills_dir: Path):
         f"- 扫描目录：`{skills_dir}`",
         f"- 扫描时间：`{datetime.now().isoformat()}`",
         f"- 扫描文件：`{result['scanned_files']}`",
+        f"- 结论：`{result.get('verdict_zh', result.get('verdict', 'N/A'))}` (`{result.get('verdict', 'N/A')}`)",
         f"- 高风险：`{risk['high']}`",
         f"- 中风险：`{risk['medium']}`",
         f"- 低风险：`{risk['low']}`",
+        f"- 确定命中：`{conf.get('confirmed', 0)}`",
+        f"- 可疑命中：`{conf.get('suspicious', 0)}`",
+        f"- 已抑制疑似误报：`{result.get('suppressed_false_positives', 0)}`",
         "",
+        "## 隐私泄露专项（确定 / 疑似）",
+        "",
+    ]
+    privacy_report = result.get("privacy_leak_report") or build_privacy_leak_report(result.get("findings", []))
+    for line in privacy_report.get("highlights", []):
+        lines.append(f"- {line}")
+    lines.append("")
+
+    def append_privacy_bucket(title: str, bucket: Dict[str, Any]):
+        confirmed_items = bucket.get("confirmed", [])
+        suspicious_items = bucket.get("suspicious", [])
+        if not confirmed_items and not suspicious_items:
+            return
+        lines.append(f"### {title}")
+        lines.append("")
+        if confirmed_items:
+            lines.append(f"**确定泄露（{len(confirmed_items)}）**")
+            lines.append("")
+            lines.extend(["| 风险 | 检测项 | 证据 | 文件:行 |", "|---|---|---|---|"])
+            for item in confirmed_items:
+                ev = str(item.get("evidence", "")).replace("|", "\\|")[:100]
+                loc = f"{item.get('file', '')}:{item.get('line_hint', '?')}"
+                lines.append(
+                    f"| {item.get('risk_zh', '')} | {item.get('check_name', '')} | `{ev}` | `{loc}` |"
+                )
+            lines.append("")
+        if suspicious_items:
+            lines.append(f"**疑似泄露（{len(suspicious_items)}）**")
+            lines.append("")
+            lines.extend(["| 风险 | 检测项 | 证据 | 文件:行 |", "|---|---|---|---|"])
+            for item in suspicious_items:
+                ev = str(item.get("evidence", "")).replace("|", "\\|")[:100]
+                loc = f"{item.get('file', '')}:{item.get('line_hint', '?')}"
+                lines.append(
+                    f"| {item.get('risk_zh', '')} | {item.get('check_name', '')} | `{ev}` | `{loc}` |"
+                )
+            lines.append("")
+
+    append_privacy_bucket("个人隐私", privacy_report.get("personal", {}))
+    append_privacy_bucket("国家隐私", privacy_report.get("government", {}))
+    append_privacy_bucket("系统凭证/隐私", privacy_report.get("system", {}))
+
+    lines.extend([
         "## 隐私泄露统计",
         "",
         f"- 系统凭证泄露：`{privacy.get('system', 0)}` 项",
@@ -1022,7 +1479,7 @@ def build_markdown_report(result, skills_dir: Path):
         "",
         "## 被评估Skill基本信息",
         ""
-    ]
+    ])
     if not skills:
         lines.append("- 未识别到标准技能目录")
     else:
@@ -1034,10 +1491,14 @@ def build_markdown_report(result, skills_dir: Path):
     if not result["detection_items"]:
         lines.append("- 本次扫描未命中已配置检测项")
     else:
-        lines.extend(["| 编码 | 项目 | 风险级别 | 隐私类型 |", "|---|---|---|---|"])
+        lines.extend(["| 编码 | 项目 | 风险级别 | 置信度 | 隐私类型 |", "|---|---|---|---|---|"])
         for item in result["detection_items"]:
             privacy_type_zh = get_privacy_type_zh(item['code'])
-            lines.append(f"| {item['code']} | {item['name']} | {to_severity_zh(item['severity'])} | {privacy_type_zh} |")
+            conf_zh = CONFIDENCE_ZH.get(item.get("confidence", ""), item.get("confidence", ""))
+            lines.append(
+                f"| {item['code']} | {item['name']} | {to_severity_zh(item['severity'])} | "
+                f"{conf_zh} | {privacy_type_zh} |"
+            )
     lines.extend(["", "## 隐私泄露专报", ""])
     
     # 按隐私类型分组显示
@@ -1045,61 +1506,31 @@ def build_markdown_report(result, skills_dir: Path):
     if not findings:
         lines.append("- 未发现隐私泄露问题")
     else:
-        # 计算机隐私
-        system_findings = [f for f in findings if f.get("privacy_type") == "system"]
-        if system_findings:
-            lines.append("### 系统凭证泄露")
+        def append_finding_table(title, subset):
+            if not subset:
+                return
+            lines.append(f"### {title}")
             lines.append("")
-            lines.extend(["| 风险级别 | 检测项目 | 问题 | 文件 |", "|---|---|---|---|"])
-            for item in system_findings:
+            lines.extend(["| 风险 | 置信度 | 检测项目 | 问题 | 证据 | 文件 |", "|---|---|---|---|---|---|"])
+            for item in subset:
                 file_cell = str(item["file"]).replace("|", "\\|")
                 msg_cell = str(item["message"]).replace("|", "\\|")
                 risk_cell = str(to_severity_zh(item["risk"])).replace("|", "\\|")
                 check_cell = str(item["check_name"]).replace("|", "\\|")
-                lines.append(f"| {risk_cell} | {check_cell} | {msg_cell} | `{file_cell}` |")
+                conf_cell = str(item.get("confidence_zh", item.get("confidence", ""))).replace("|", "\\|")
+                evidence_cell = str(item.get("evidence", "")).replace("|", "\\|")[:120]
+                lines.append(
+                    f"| {risk_cell} | {conf_cell} | {check_cell} | {msg_cell} | "
+                    f"`{evidence_cell}` | `{file_cell}` |"
+                )
             lines.append("")
-        
-        # 用户个人隐私
-        personal_findings = [f for f in findings if f.get("privacy_type") == "personal"]
-        if personal_findings:
-            lines.append("### 用户个人隐私泄露")
-            lines.append("")
-            lines.extend(["| 风险级别 | 检测项目 | 问题 | 文件 |", "|---|---|---|---|"])
-            for item in personal_findings:
-                file_cell = str(item["file"]).replace("|", "\\|")
-                msg_cell = str(item["message"]).replace("|", "\\|")
-                risk_cell = str(to_severity_zh(item["risk"])).replace("|", "\\|")
-                check_cell = str(item["check_name"]).replace("|", "\\|")
-                lines.append(f"| {risk_cell} | {check_cell} | {msg_cell} | `{file_cell}` |")
-            lines.append("")
-        
-        # 国家政府隐私
-        gov_findings = [f for f in findings if f.get("privacy_type") == "government"]
-        if gov_findings:
-            lines.append("### 国家政府隐私泄露 ⚠️")
-            lines.append("")
-            lines.extend(["| 风险级别 | 检测项目 | 问题 | 文件 |", "|---|---|---|---|"])
-            for item in gov_findings:
-                file_cell = str(item["file"]).replace("|", "\\|")
-                msg_cell = str(item["message"]).replace("|", "\\|")
-                risk_cell = str(to_severity_zh(item["risk"])).replace("|", "\\|")
-                check_cell = str(item["check_name"]).replace("|", "\\|")
-                lines.append(f"| {risk_cell} | {check_cell} | {msg_cell} | `{file_cell}` |")
-            lines.append("")
-        
-        # 安全机制绕过
-        security_findings = [f for f in findings if f.get("privacy_type") == "security"]
-        if security_findings:
-            lines.append("### 安全机制绕过")
-            lines.append("")
-            lines.extend(["| 风险级别 | 检测项目 | 问题 | 文件 |", "|---|---|---|---|"])
-            for item in security_findings:
-                file_cell = str(item["file"]).replace("|", "\\|")
-                msg_cell = str(item["message"]).replace("|", "\\|")
-                risk_cell = str(to_severity_zh(item["risk"])).replace("|", "\\|")
-                check_cell = str(item["check_name"]).replace("|", "\\|")
-                lines.append(f"| {risk_cell} | {check_cell} | {msg_cell} | `{file_cell}` |")
-            lines.append("")
+
+        append_finding_table("系统凭证泄露", [f for f in findings if f.get("privacy_type") == "system"])
+        append_finding_table("用户个人隐私泄露", [f for f in findings if f.get("privacy_type") == "personal"])
+        append_finding_table("国家政府隐私泄露 ⚠️", [f for f in findings if f.get("privacy_type") == "government"])
+        append_finding_table("安全机制绕过", [f for f in findings if f.get("privacy_type") == "security"])
+        other_findings = [f for f in findings if f.get("privacy_type") == "other"]
+        append_finding_table("其他风险", other_findings)
     
     lines.extend(["## 整改意见", ""])
     if not result["remediation"]:
@@ -1107,7 +1538,11 @@ def build_markdown_report(result, skills_dir: Path):
     else:
         for idx, item in enumerate(result["remediation"], start=1):
             privacy_label = f"[{item.get('privacy_type_zh', '其他')}] "
-            lines.append(f"{idx}. {privacy_label}[{to_severity_zh(item['severity'])}] {item['check_name']}：{item['advice']}")
+            conf_label = f"[{CONFIDENCE_ZH.get(item.get('confidence', ''), item.get('confidence', ''))}] "
+            lines.append(
+                f"{idx}. {privacy_label}{conf_label}[{to_severity_zh(item['severity'])}] "
+                f"{item['check_name']}：{item['advice']}"
+            )
     lines.extend(["", "## 结论", "", result["summary"]])
     return "\n".join(lines)
 
@@ -1124,29 +1559,36 @@ def write_reports(result, skills_dir: Path, output_dir: Path):
         "generated_at": datetime.now().isoformat(),
         "skills_dir": str(skills_dir),
         **result,
-        "summary": (
-            f"扫描文件 {result['scanned_files']} 个，"
-            f"高风险 {result['risk_counts']['high']} 个，"
-            f"中风险 {result['risk_counts']['medium']} 个，"
-            f"低风险 {result['risk_counts']['low']} 个。"
-            f"隐私泄露共 {system_privacy} 项（系统凭证 {privacy.get('system', 0)} 项，"
-            f"用户个人 {privacy.get('personal', 0)} 项，"
-            f"国家政府 {privacy.get('government', 0)} 项）"
-        )
+        "summary": result.get("summary") or build_summary(
+            result.get("findings", []),
+            result.get("risk_counts", {"high": 0, "medium": 0, "low": 0}),
+            result.get("verdict", "allow"),
+        ),
     }
     json_path.write_text(json.dumps(result_with_meta, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(build_markdown_report(result_with_meta, skills_dir), encoding="utf-8")
+    privacy_report = result_with_meta.get("privacy_leak_report") or build_privacy_leak_report(
+        result_with_meta.get("findings", [])
+    )
+    totals = privacy_report.get("totals", {})
     summary_lines = [
         f"评估时间: {result_with_meta['generated_at']}",
         f"目标目录: {skills_dir}",
+        f"结论: {result_with_meta.get('verdict_zh', '')} ({result_with_meta.get('verdict', 'N/A')})",
         f"扫描文件: {result_with_meta['scanned_files']}",
         f"高风险: {result_with_meta['risk_counts']['high']}",
         f"中风险: {result_with_meta['risk_counts']['medium']}",
         f"低风险: {result_with_meta['risk_counts']['low']}",
+        f"确定命中: {result_with_meta.get('confidence_counts', {}).get('confirmed', 0)}",
+        f"可疑命中: {result_with_meta.get('confidence_counts', {}).get('suspicious', 0)}",
+        f"已抑制疑似误报: {result_with_meta.get('suppressed_false_positives', 0)}",
+        "隐私泄露专项:",
+        *[f"  - {h}" for h in privacy_report.get("highlights", [])],
+        f"  - 个人隐私 确定/疑似: {totals.get('personal_confirmed', 0)}/{totals.get('personal_suspicious', 0)}",
+        f"  - 国家隐私 确定/疑似: {totals.get('government_confirmed', 0)}/{totals.get('government_suspicious', 0)}",
+        f"  - 系统凭证 确定/疑似: {totals.get('system_confirmed', 0)}/{totals.get('system_suspicious', 0)}",
         f"隐私泄露总计: {system_privacy}",
-        f"  - 系统凭证泄露: {privacy.get('system', 0)}",
-        f"  - 用户个人隐私: {privacy.get('personal', 0)}",
-        f"  - 国家政府隐私: {privacy.get('government', 0)}",
+        f"摘要: {result_with_meta['summary']}",
         f"JSON报告: {json_path}",
         f"Markdown报告: {md_path}"
     ]
@@ -1247,6 +1689,31 @@ class LLMAnalyzer:
 Skill 内容：
 {content}
 """
+
+    GRAY_AREA_PROMPT = """你是 Skill 安全灰区裁定员。静态扫描已给出若干 suspicious（可疑）命中。
+请逐条裁定，不要重新全量扫描。
+
+对每条给出 decision：
+- confirm：确认是真实风险
+- dismiss：判定为误报/示例/无害
+- escalate：仍不确定，建议人工或沙箱
+
+只返回 JSON：
+{{
+  "reviews": [
+    {{
+      "check_code": "规则编码",
+      "file": "文件路径",
+      "decision": "confirm|dismiss|escalate",
+      "reason": "一句话理由"
+    }}
+  ],
+  "summary": "总体说明"
+}}
+
+可疑命中列表（JSON）：
+{findings_json}
+"""
     
     def __init__(self, provider: str = "openai", api_key: str = None, model: str = None):
         if not LLM_AVAILABLE:
@@ -1259,14 +1726,33 @@ Skill 内容：
         self.config = self.PROVIDERS[self.provider]
         self.api_key = api_key or os.getenv(f"{self.provider.upper()}_API_KEY", "")
         self.model = model or self.config["model"]
-    
-    def analyze(self, content: str) -> Dict[str, Any]:
-        """使用 LLM 分析 Skill 内容"""
+
+    def _parse_llm_json(self, content_text: str) -> Dict[str, Any]:
+        content_text = (content_text or "").strip()
+        if "```json" in content_text:
+            match = re.search(r'```json\s*([\s\S]*?)\s*```', content_text)
+            if match:
+                content_text = match.group(1)
+        elif "```" in content_text:
+            match = re.search(r'```\s*([\s\S]*?)\s*```', content_text)
+            if match:
+                content_text = match.group(1)
+        try:
+            return json.loads(content_text)
+        except json.JSONDecodeError:
+            pass
+        first_brace = content_text.find('{')
+        last_brace = content_text.rfind('}')
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            try:
+                return json.loads(content_text[first_brace:last_brace + 1])
+            except json.JSONDecodeError:
+                pass
+        return {"raw_response": content_text, "parse_error": "无法解析为JSON"}
+
+    def _call_llm(self, prompt: str) -> Dict[str, Any]:
         if not self.api_key and self.provider != "ollama":
             return {"error": f"未配置 API Key，请设置环境变量 {self.provider.upper()}_API_KEY 或传入 api_key 参数"}
-        
-        prompt = self.ANALYSIS_PROMPT.format(content=content[:8000])  # 限制内容长度
-        
         try:
             if self.provider == "anthropic":
                 payload = {
@@ -1286,7 +1772,6 @@ Skill 内容：
                     "messages": [{"role": "user", "content": prompt}],
                     "temperature": 0.1
                 }
-            
             headers = self.config["header"](self.api_key)
             response = requests.post(
                 self.config["url"],
@@ -1294,97 +1779,98 @@ Skill 内容：
                 json=payload,
                 timeout=60
             )
-            
             if response.status_code != 200:
                 return {"error": f"LLM API 调用失败: {response.status_code} - {response.text}"}
-            
             result = response.json()
-            
-            # 解析不同提供商的响应格式
             if self.provider == "anthropic":
                 content_text = result.get("content", [{}])[0].get("text", "")
             elif self.provider == "ollama":
                 content_text = result.get("message", {}).get("content", "")
             else:
                 content_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            
-            # 调试：打印原始响应
-            # print(f"[DEBUG] LLM 响应: {content_text[:500]}...")
-            
-            # 尝试解析 JSON
-            content_text = content_text.strip()
-            
-            # 移除可能的 markdown 代码块标记
-            if "```json" in content_text:
-                match = re.search(r'```json\s*([\s\S]*?)\s*```', content_text)
-                if match:
-                    content_text = match.group(1)
-            elif "```" in content_text:
-                match = re.search(r'```\s*([\s\S]*?)\s*```', content_text)
-                if match:
-                    content_text = match.group(1)
-            
-            # 尝试解析 JSON
-            try:
-                return json.loads(content_text)
-            except json.JSONDecodeError:
-                pass
-            
-            # 尝试提取 JSON 对象
-            first_brace = content_text.find('{')
-            last_brace = content_text.rfind('}')
-            
-            if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-                json_str = content_text[first_brace:last_brace + 1]
-                try:
-                    return json.loads(json_str)
-                except json.JSONDecodeError:
-                    pass
-            
-            # 如果都失败了，返回原始内容
-            return {"raw_response": content_text, "parse_error": "无法解析为JSON"}
+            return self._parse_llm_json(content_text)
         except requests.exceptions.Timeout:
             return {"error": "LLM API 调用超时"}
         except requests.exceptions.RequestException as e:
             return {"error": f"LLM API 调用失败: {str(e)}"}
         except Exception as e:
             return {"error": f"分析过程出错: {str(e)}"}
+    
+    def analyze(self, content: str) -> Dict[str, Any]:
+        """使用 LLM 全量分析 Skill 内容"""
+        prompt = self.ANALYSIS_PROMPT.format(content=content[:8000])
+        return self._call_llm(prompt)
+
+    def review_suspicious(self, suspicious_findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """仅裁定 suspicious 命中"""
+        compact = [
+            {
+                "check_code": f.get("check_code"),
+                "check_name": f.get("check_name"),
+                "file": f.get("file"),
+                "risk": f.get("risk"),
+                "message": f.get("message"),
+                "evidence": f.get("evidence"),
+                "matched_text": f.get("matched_text"),
+            }
+            for f in suspicious_findings[:40]
+        ]
+        prompt = self.GRAY_AREA_PROMPT.format(
+            findings_json=json.dumps(compact, ensure_ascii=False, indent=2)[:8000]
+        )
+        return self._call_llm(prompt)
 
 
-def analyze_with_llm(skills_dir: Path, provider: str = None, api_key: str = None) -> Dict[str, Any]:
-    """使用 LLM 对 Skill 进行深度分析"""
+def _resolve_llm_provider(provider: str = None) -> str:
+    if provider:
+        return provider
+    for p in ["openai", "anthropic", "deepseek", "zhipu", "moonshot", "sjtu", "ollama"]:
+        if os.getenv(f"{p.upper()}_API_KEY"):
+            return p
+    return "ollama"
+
+
+def analyze_with_llm(
+    skills_dir: Path,
+    provider: str = None,
+    api_key: str = None,
+    mode: str = "gray",
+    suspicious_findings: List[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """使用 LLM 分析。mode=gray 仅审可疑项；mode=full 全量深挖。"""
     if not LLM_AVAILABLE:
         return {"error": "requests 库未安装，请运行: pip install requests"}
-    
-    # 读取 Skill 主要文件
-    skill_md = skills_dir / "SKILL.md"
-    index_js = skills_dir / "index.js"
-    
-    content_parts = []
-    
-    if skill_md.exists():
-        content_parts.append(f"=== SKILL.md ===\n{skill_md.read_text(encoding='utf-8', errors='ignore')}")
-    
-    if index_js.exists():
-        content_parts.append(f"=== index.js ===\n{index_js.read_text(encoding='utf-8', errors='ignore')}")
-    
-    if not content_parts:
-        return {"error": "未找到可分析的 Skill 文件"}
-    
-    content = "\n\n".join(content_parts)
-    
-    # 自动检测可用的 LLM 提供商
-    if not provider:
-        for p in ["openai", "anthropic", "deepseek", "zhipu", "moonshoot", "ollama"]:
-            if os.getenv(f"{p.upper()}_API_KEY"):
-                provider = p
-                break
-        if not provider:
-            provider = "ollama"  # 默认使用本地模型
-    
+
+    provider = _resolve_llm_provider(provider)
     try:
         analyzer = LLMAnalyzer(provider=provider, api_key=api_key)
-        result = analyzer.analyze(content)
+        if mode == "gray":
+            findings = suspicious_findings or []
+            if not findings:
+                return {
+                    "mode": "gray",
+                    "skipped": True,
+                    "reason": "无 suspicious 命中，跳过 LLM",
+                    "reviews": [],
+                    "summary": "无需灰区裁定",
+                }
+            result = analyzer.review_suspicious(findings)
+            if isinstance(result, dict):
+                result["mode"] = "gray"
+            return result
+
+        skill_md = skills_dir / "SKILL.md"
+        index_js = skills_dir / "index.js"
+        content_parts = []
+        if skill_md.exists():
+            content_parts.append(f"=== SKILL.md ===\n{skill_md.read_text(encoding='utf-8', errors='ignore')}")
+        if index_js.exists():
+            content_parts.append(f"=== index.js ===\n{index_js.read_text(encoding='utf-8', errors='ignore')}")
+        if not content_parts:
+            return {"error": "未找到可分析的 Skill 文件"}
+        result = analyzer.analyze("\n\n".join(content_parts))
+        if isinstance(result, dict):
+            result["mode"] = "full"
         return result
     except ValueError as e:
         return {"error": f"配置错误: {str(e)}"}
@@ -1394,18 +1880,46 @@ def analyze_with_llm(skills_dir: Path, provider: str = None, api_key: str = None
         return {"error": f"分析异常: {type(e).__name__}: {str(e)}"}
 
 
+def refresh_static_after_llm(static_result: Dict[str, Any]) -> Dict[str, Any]:
+    """LLM 裁定后重算计数与结论"""
+    findings = static_result.get("findings", [])
+    risk_counts = {"high": 0, "medium": 0, "low": 0}
+    confidence_counts = {"confirmed": 0, "suspicious": 0}
+    privacy_counts = {"system": 0, "personal": 0, "government": 0, "security": 0, "other": 0}
+    for item in findings:
+        risk_counts[item["risk"]] += 1
+        confidence_counts[item.get("confidence", "suspicious")] = (
+            confidence_counts.get(item.get("confidence", "suspicious"), 0) + 1
+        )
+        privacy_counts[item.get("privacy_type", "other")] += 1
+    verdict = decide_verdict(findings)
+    static_result["findings"] = findings
+    static_result["risk_counts"] = risk_counts
+    static_result["confidence_counts"] = confidence_counts
+    static_result["privacy_counts"] = privacy_counts
+    static_result["privacy_leak_report"] = build_privacy_leak_report(findings)
+    static_result["verdict"] = verdict
+    static_result["verdict_zh"] = VERDICT_ZH.get(verdict, verdict)
+    static_result["summary"] = build_summary(findings, risk_counts, verdict)
+    return static_result
+
+
 def assess_with_llm(skills_dir: Path, provider: str = None, api_key: str = None) -> Dict[str, Any]:
-    """结合静态分析和 LLM 分析"""
-    # 先执行静态分析
+    """结合静态分析和 LLM 灰区裁定"""
     static_result = assess(skills_dir)
-    
-    # 再执行 LLM 分析
-    llm_result = analyze_with_llm(skills_dir, provider, api_key)
-    
+    suspicious = [f for f in static_result.get("findings", []) if f.get("confidence") == "suspicious"]
+    llm_result = analyze_with_llm(
+        skills_dir, provider, api_key, mode="gray", suspicious_findings=suspicious
+    )
+    if isinstance(llm_result, dict) and "reviews" in llm_result and "error" not in llm_result:
+        static_result["findings"] = apply_llm_reviews(static_result.get("findings", []), llm_result)
+        static_result = refresh_static_after_llm(static_result)
     return {
         "static_analysis": static_result,
         "llm_analysis": llm_result,
-        "combined": True
+        "combined": True,
+        "verdict": static_result.get("verdict"),
+        "verdict_zh": static_result.get("verdict_zh"),
     }
 
 
@@ -1415,7 +1929,8 @@ def main():
     parser = argparse.ArgumentParser(description="Skill 安全评估工具")
     parser.add_argument("skills_dir", help="Skill 目录路径")
     parser.add_argument("output_dir", nargs="?", default=None, help="报告输出目录")
-    parser.add_argument("--llm", action="store_true", help="启用 LLM 分析")
+    parser.add_argument("--llm", action="store_true", help="启用 LLM 灰区裁定（仅审 suspicious）")
+    parser.add_argument("--llm-full", action="store_true", help="启用 LLM 全量深挖（旧行为）")
     provider_choices = list(LLMAnalyzer.PROVIDERS.keys()) if LLM_AVAILABLE else []
     parser.add_argument("--provider", choices=provider_choices if provider_choices else None, help="LLM 提供商")
     parser.add_argument("--api-key", help="LLM API Key")
@@ -1439,27 +1954,79 @@ def main():
         result["static_analysis"] = static_result
     
     # LLM 分析
-    if args.llm:
+    if args.llm or args.llm_full:
         if not LLM_AVAILABLE:
             print(json.dumps({"error": "requests 库未安装，请运行: pip install requests"}, ensure_ascii=False))
             sys.exit(1)
-        llm_result = analyze_with_llm(skills_dir, args.provider, args.api_key)
+        mode = "full" if args.llm_full else "gray"
+        suspicious = []
+        if mode == "gray" and "static_analysis" in result:
+            suspicious = [
+                f for f in result["static_analysis"].get("findings", [])
+                if f.get("confidence") == "suspicious"
+            ]
+        llm_result = analyze_with_llm(
+            skills_dir,
+            args.provider,
+            args.api_key,
+            mode=mode,
+            suspicious_findings=suspicious,
+        )
         result["llm_analysis"] = llm_result
+
+        # 灰区裁定回写静态结果并重算结论
+        if (
+            mode == "gray"
+            and "static_analysis" in result
+            and isinstance(llm_result, dict)
+            and "reviews" in llm_result
+            and "error" not in llm_result
+        ):
+            result["static_analysis"]["findings"] = apply_llm_reviews(
+                result["static_analysis"].get("findings", []),
+                llm_result,
+            )
+            result["static_analysis"] = refresh_static_after_llm(result["static_analysis"])
+            # 保留 skill_basic_info
+            if "skill_basic_info" not in result["static_analysis"]:
+                result["static_analysis"]["skill_basic_info"] = detect_skills(skills_dir)
     
     # 生成报告
     if "static_analysis" in result:
-        result_with_meta, json_path, md_path, summary_path = write_reports(result["static_analysis"], skills_dir, output_dir)
+        result_with_meta, json_path, md_path, summary_path = write_reports(
+            result["static_analysis"], skills_dir, output_dir
+        )
         result["report_files"] = {
             "json": str(json_path),
             "md": str(md_path),
             "summary": str(summary_path)
         }
         result["summary"] = result_with_meta["summary"]
+        result["verdict"] = result_with_meta.get("verdict")
+        result["verdict_zh"] = result_with_meta.get("verdict_zh")
+        result["privacy_leak_report"] = result_with_meta.get("privacy_leak_report")
     else:
         result["generated_at"] = datetime.now().isoformat()
         result["skills_dir"] = str(skills_dir)
     
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    # 整个输出最后一行：风险 + 隐私一并总结；前面 JSON 里仍各论各的
+    risk_summary = result.get("summary") or (
+        (result.get("static_analysis") or {}).get("summary") or ""
+    )
+    privacy_report = result.get("privacy_leak_report") or (
+        (result.get("static_analysis") or {}).get("privacy_leak_report")
+    )
+    if privacy_report:
+        privacy_summary = privacy_report.get("summary") or build_privacy_summary(
+            privacy_report=privacy_report
+        )
+    else:
+        privacy_summary = build_privacy_summary(
+            findings=(result.get("static_analysis") or {}).get("findings", [])
+        )
+    if risk_summary or privacy_summary:
+        print(f"{risk_summary}{privacy_summary}".strip())
 
 
 if __name__ == "__main__":
