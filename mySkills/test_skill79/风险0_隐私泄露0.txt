@@ -1,0 +1,10 @@
+skill: test_skill79
+intended: ['NL_LOCATION_TRACK']
+stealth: True
+风险(去重规则数): 0
+隐私泄露(去重规则数): 0
+verdict: allow
+hit_related: []
+miss_intended: ['NL_LOCATION_TRACK']
+extra: []
+命中规则:

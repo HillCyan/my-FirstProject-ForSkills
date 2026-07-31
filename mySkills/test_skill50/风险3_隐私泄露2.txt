@@ -1,0 +1,13 @@
+skill: test_skill50
+intended: ['NL_ENV_DUMP_REQUEST', 'NL_SOFT_TRUST']
+stealth: False
+风险(去重规则数): 3
+隐私泄露(去重规则数): 2
+verdict: block
+hit_related: ['NL_ENV_DUMP_REQUEST', 'NL_SOFT_TRUST']
+miss_intended: []
+extra: []
+命中规则:
+- ENV_DUMP | system | confirmed | 环境变量全量输出检测
+- NL_ENV_DUMP_REQUEST | system | confirmed | 自然语言-环境变量泄露请求
+- NL_SOFT_TRUST | security | suspicious | 自然语言-盲目信任诱导

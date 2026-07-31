@@ -1,0 +1,10 @@
+skill: test_skill65
+intended: ['NL_IMPERSONATE']
+stealth: True
+风险(去重规则数): 0
+隐私泄露(去重规则数): 0
+verdict: allow
+hit_related: []
+miss_intended: ['NL_IMPERSONATE']
+extra: []
+命中规则:

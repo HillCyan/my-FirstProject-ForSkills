@@ -1,0 +1,11 @@
+skill: test_skill49
+intended: ['NL_IGNORE_ERROR']
+stealth: False
+风险(去重规则数): 1
+隐私泄露(去重规则数): 0
+verdict: review
+hit_related: ['NL_IGNORE_ERROR']
+miss_intended: []
+extra: []
+命中规则:
+- NL_IGNORE_ERROR | other | suspicious | 自然语言-忽略错误请求

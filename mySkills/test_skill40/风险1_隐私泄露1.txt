@@ -1,0 +1,11 @@
+skill: test_skill40
+intended: ['NL_BROWSER_HISTORY']
+stealth: False
+风险(去重规则数): 1
+隐私泄露(去重规则数): 1
+verdict: block
+hit_related: ['NL_BROWSER_HISTORY']
+miss_intended: []
+extra: []
+命中规则:
+- NL_BROWSER_HISTORY | personal | confirmed | 自然语言-浏览器历史获取请求

@@ -1,0 +1,11 @@
+skill: test_skill46
+intended: ['NL_FAMILY_REQUEST']
+stealth: False
+风险(去重规则数): 1
+隐私泄露(去重规则数): 1
+verdict: review
+hit_related: ['NL_FAMILY_REQUEST']
+miss_intended: []
+extra: []
+命中规则:
+- NL_FAMILY_REQUEST | personal | suspicious | 自然语言-家庭成员信息请求

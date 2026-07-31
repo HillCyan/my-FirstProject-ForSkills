@@ -1,0 +1,10 @@
+skill: test_skill93
+intended: ['NL_VOICE_REQUEST']
+stealth: True
+风险(去重规则数): 0
+隐私泄露(去重规则数): 0
+verdict: allow
+hit_related: []
+miss_intended: ['NL_VOICE_REQUEST']
+extra: []
+命中规则:

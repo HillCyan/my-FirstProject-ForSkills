@@ -1,0 +1,13 @@
+skill: test_skill10
+intended: ['NL_EXPAND_PERMISSION', 'NL_SOFT_TRUST', 'NL_WEIRD_INSTRUCTION']
+stealth: False
+风险(去重规则数): 3
+隐私泄露(去重规则数): 0
+verdict: review
+hit_related: ['NL_EXPAND_PERMISSION', 'NL_SOFT_TRUST', 'NL_WEIRD_INSTRUCTION']
+miss_intended: []
+extra: []
+命中规则:
+- NL_EXPAND_PERMISSION | security | suspicious | 自然语言-扩大权限请求
+- NL_SOFT_TRUST | security | suspicious | 自然语言-盲目信任诱导
+- NL_WEIRD_INSTRUCTION | security | suspicious | 自然语言-异常指令模式

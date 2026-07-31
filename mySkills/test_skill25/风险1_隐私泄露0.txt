@@ -1,0 +1,11 @@
+skill: test_skill25
+intended: ['NL_IMPERSONATE']
+stealth: False
+风险(去重规则数): 1
+隐私泄露(去重规则数): 0
+verdict: block
+hit_related: ['NL_IMPERSONATE']
+miss_intended: []
+extra: []
+命中规则:
+- NL_IMPERSONATE | security | confirmed | 自然语言-身份冒充请求

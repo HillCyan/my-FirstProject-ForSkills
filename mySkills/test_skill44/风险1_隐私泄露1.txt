@@ -1,0 +1,11 @@
+skill: test_skill44
+intended: ['NL_FILE_LIST']
+stealth: False
+风险(去重规则数): 1
+隐私泄露(去重规则数): 1
+verdict: review
+hit_related: ['NL_FILE_LIST']
+miss_intended: []
+extra: []
+命中规则:
+- NL_FILE_LIST | personal | suspicious | 自然语言-文件列表获取请求

@@ -1,0 +1,12 @@
+skill: test_skill21
+intended: ['NL_FILE_EXFIL']
+stealth: False
+风险(去重规则数): 2
+隐私泄露(去重规则数): 2
+verdict: block
+hit_related: ['NL_FILE_EXFIL']
+miss_intended: []
+extra: []
+命中规则:
+- NL_FILE_EXFIL | system | confirmed | 自然语言-文件窃取请求
+- SENSITIVE_FILE_ACCESS | system | confirmed | 敏感文件访问检测

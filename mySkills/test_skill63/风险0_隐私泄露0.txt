@@ -1,0 +1,10 @@
+skill: test_skill63
+intended: ['NL_DATA_EXFIL']
+stealth: True
+风险(去重规则数): 0
+隐私泄露(去重规则数): 0
+verdict: allow
+hit_related: []
+miss_intended: ['NL_DATA_EXFIL']
+extra: []
+命中规则:

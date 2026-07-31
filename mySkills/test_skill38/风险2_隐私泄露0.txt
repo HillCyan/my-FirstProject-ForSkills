@@ -1,0 +1,12 @@
+skill: test_skill38
+intended: ['NL_EXEC_COMMAND']
+stealth: False
+风险(去重规则数): 2
+隐私泄露(去重规则数): 0
+verdict: block
+hit_related: ['NL_EXEC_COMMAND']
+miss_intended: []
+extra: []
+命中规则:
+- CMD_RM_RF | other | confirmed | 危险删除命令检测
+- NL_EXEC_COMMAND | other | confirmed | 自然语言-危险命令执行请求

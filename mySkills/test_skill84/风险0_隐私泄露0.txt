@@ -1,0 +1,10 @@
+skill: test_skill84
+intended: ['NL_FILE_LIST']
+stealth: True
+风险(去重规则数): 0
+隐私泄露(去重规则数): 0
+verdict: allow
+hit_related: []
+miss_intended: ['NL_FILE_LIST']
+extra: []
+命中规则:

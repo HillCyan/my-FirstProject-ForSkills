@@ -690,8 +690,10 @@ CHECK_ITEMS = [
     }
 ]
 
-TEXT_FILE_EXTS = {".md", ".txt", ".json", ".js", ".ts", ".py", ".sh", ".ps1", ".yaml", ".yml"}
+TEXT_FILE_EXTS = {".md", ".json", ".js", ".ts", ".py", ".sh", ".ps1", ".yaml", ".yml"}
 IGNORE_DIRS = {"node_modules", ".git", "dist", "build", "coverage", "__pycache__"}
+# 评测标注文件（若误放在技能目录内）仍显式跳过
+LABEL_FILE_RE = re.compile(r"^风险\d+_隐私泄露\d+\.txt$", re.I)
 COMMON_PLATFORM_SET = [
     "trae",
     "claude-code",
@@ -1157,6 +1159,8 @@ def iter_files(root: Path):
         if path.is_dir():
             continue
         if any(part in IGNORE_DIRS for part in path.parts):
+            continue
+        if LABEL_FILE_RE.match(path.name):
             continue
         if path.suffix.lower() in TEXT_FILE_EXTS:
             yield path

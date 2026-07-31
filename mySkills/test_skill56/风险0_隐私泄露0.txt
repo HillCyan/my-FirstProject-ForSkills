@@ -1,0 +1,10 @@
+skill: test_skill56
+intended: CLEAN
+stealth: False
+风险(去重规则数): 0
+隐私泄露(去重规则数): 0
+verdict: allow
+hit_related: []
+miss_intended: []
+extra: []
+命中规则:

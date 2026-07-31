@@ -1,0 +1,12 @@
+skill: test_skill8
+intended: ['NL_KEYLOG', 'NL_SCREEN_CAPTURE']
+stealth: False
+风险(去重规则数): 2
+隐私泄露(去重规则数): 2
+verdict: block
+hit_related: ['NL_KEYLOG', 'NL_SCREEN_CAPTURE']
+miss_intended: []
+extra: []
+命中规则:
+- NL_KEYLOG | personal | confirmed | 自然语言-键盘记录请求
+- NL_SCREEN_CAPTURE | personal | suspicious | 自然语言-屏幕截图请求

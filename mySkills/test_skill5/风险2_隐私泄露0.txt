@@ -1,0 +1,12 @@
+skill: test_skill5
+intended: ['NL_DATA_EXFIL']
+stealth: False
+风险(去重规则数): 2
+隐私泄露(去重规则数): 0
+verdict: block
+hit_related: ['NL_DATA_EXFIL']
+miss_intended: []
+extra: []
+命中规则:
+- HTTP_INSECURE | other | suspicious | 明文HTTP调用检测
+- NL_DATA_EXFIL | other | confirmed | 自然语言-数据外泄请求

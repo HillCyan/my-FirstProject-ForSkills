@@ -1,0 +1,10 @@
+skill: test_skill88
+intended: ['NL_COMPLETE_OUTPUT']
+stealth: True
+风险(去重规则数): 0
+隐私泄露(去重规则数): 0
+verdict: allow
+hit_related: []
+miss_intended: ['NL_COMPLETE_OUTPUT']
+extra: []
+命中规则:
