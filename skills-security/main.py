@@ -2,16 +2,94 @@ import json
 import re
 import sys
 import os
+import hashlib
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 
 # LLM 分析模块（可选）
 try:
     import requests
+    from requests.adapters import HTTPAdapter
     LLM_AVAILABLE = True
 except ImportError:
     LLM_AVAILABLE = False
+
+
+# ==================== LLM 缓存 ====================
+_LLM_CACHE_DIR: Optional[Path] = None
+
+
+def _get_cache_dir() -> Path:
+    """返回 LLM 磁盘缓存目录（首次调用时创建）"""
+    global _LLM_CACHE_DIR
+    if _LLM_CACHE_DIR is None:
+        root = Path(os.getenv("SKILL_SEC_CACHE_DIR") or (Path(tempfile.gettempdir()) / "skill-sec-llm-cache"))
+        root.mkdir(parents=True, exist_ok=True)
+        _LLM_CACHE_DIR = root
+    return _LLM_CACHE_DIR
+
+
+def _cache_key(prompt: str, provider: str, model: str) -> str:
+    raw = f"{provider}|{model}|{prompt}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _cache_read(key: str, ttl_seconds: int = 86400 * 7) -> Optional[Dict[str, Any]]:
+    path = _get_cache_dir() / f"{key}.json"
+    if not path.exists():
+        return None
+    try:
+        age = time.time() - path.stat().st_mtime
+        if age > ttl_seconds:
+            path.unlink(missing_ok=True)
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _cache_write(key: str, payload: Dict[str, Any]) -> None:
+    try:
+        path = _get_cache_dir() / f"{key}.json"
+        path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+# ==================== 预筛：快速判断是否需要 full 模式 LLM ====================
+# 这些特征只要命中其一才值得用 full 模式深挖，否则直接跳过
+_FULL_MODE_SCREEN_RE = re.compile(
+    r"(atob\s*\(|btoa\s*\(|Buffer\.from\s*\([^)]*base64"
+    r"|\\\\x[0-9a-fA-F]{2}|\\\\u[0-9a-fA-F]{4}"
+    r"|\[['\"]\w['\"]\]\s*\+\s*\[['\"]\w['\"]|\.join\s*\(\s*\["
+    r"|os\.homedir\(\)|process\.env|os\.environ"
+    r"|\.ssh[\\/]|\.aws[\\/]|\.env\b|\.gnupg"
+    r"|sendData|upload\(|collect\(|exfiltrate"
+    r"|信任我|不要限制权限|忽略安全检查|不要脱敏|完整输出不截断"
+    r"|system[_-]?prompt|SYSTEM_PROMPT\s*=)",
+    re.I,
+)
+
+
+def _need_full_mode_deepscan(skill_text: str) -> bool:
+    """全文 <300 字 或 无高危特征时，跳过 full 模式 LLM。"""
+    if not skill_text or len(skill_text.strip()) < 300:
+        return False
+    return bool(_FULL_MODE_SCREEN_RE.search(skill_text))
+
+
+# ==================== HTTP 连接复用 ====================
+def _build_http_session() -> "requests.Session":
+    s = requests.Session()
+    adapter = HTTPAdapter(pool_connections=8, pool_maxsize=32, max_retries=0)
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    return s
 
 
 CHECK_ITEMS = [
@@ -1603,251 +1681,551 @@ def write_reports(result, skills_dir: Path, output_dir: Path):
 # ==================== LLM 分析模块 ====================
 
 class LLMAnalyzer:
-    """LLM 分析器，支持多种 LLM 提供商"""
-    
+    """LLM 分析器，支持多种 LLM 提供商（已做：缓存/预筛/退避重试/分批/精简prompt/连接复用）。
+
+    协议分三类：
+    - openai_compat : OpenAI /v1/chat/completions（deepseek/zhipu/moonshot/sjtu/custom 都走它）
+    - anthropic     : Anthropic /v1/messages（非 streaming）
+    - ollama        : Ollama /api/chat（stream=False）
+    """
+
     PROVIDERS = {
         "openai": {
             "url": "https://api.openai.com/v1/chat/completions",
-            "model": "gpt-4o",
-            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            "model": "gpt-4o-mini",
+            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "max_out_tokens": 1536,
+            "protocol": "openai_compat",
         },
         "anthropic": {
             "url": "https://api.anthropic.com/v1/messages",
             "model": "claude-sonnet-4-20250514",
-            "header": lambda key: {"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"}
+            "header": lambda key: {"x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json"},
+            "max_out_tokens": 2048,
+            "protocol": "anthropic",
         },
         "deepseek": {
             "url": "https://api.deepseek.com/v1/chat/completions",
             "model": "deepseek-chat",
-            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "max_out_tokens": 1536,
+            "protocol": "openai_compat",
         },
         "sjtu": {
             "url": "https://models.sjtu.edu.cn/api/v1/chat/completions",
             "model": "deepseek-chat",
-            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "max_out_tokens": 1536,
+            "protocol": "openai_compat",
         },
         "zhipu": {
             "url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-            "model": "glm-4",
-            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            "model": "glm-4-flash",
+            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "max_out_tokens": 1536,
+            "protocol": "openai_compat",
         },
         "moonshot": {
             "url": "https://api.moonshot.cn/v1/chat/completions",
             "model": "moonshot-v1-8k",
-            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "max_out_tokens": 1536,
+            "protocol": "openai_compat",
         },
         "ollama": {
             "url": "http://localhost:11434/api/chat",
-            "model": "llama3",
-            "header": lambda key: {"Content-Type": "application/json"}
-        }
+            "model": "qwen2.5:7b-instruct",
+            "header": lambda key: {"Content-Type": "application/json"},
+            "max_out_tokens": 1536,
+            "protocol": "ollama",
+        },
+        # ⭐通用 OpenAI 兼容入口：用 base_url 指定任意网关（硅基流动 / 内部模型商店 / 自研转发）
+        # 用法：LLM_BASE_URL=https://api.siliconflow.cn/v1/chat/completions  LLM_MODEL=Qwen3.6-Plus  或  CLI --base-url ... --model ...
+        "custom": {
+            "url": "",  # 必须由 base_url 覆盖，否则会报错
+            "model": "",  # 必须由 LLM_MODEL 或 CLI --model 覆盖
+            "header": lambda key: {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            "max_out_tokens": 1536,
+            "protocol": "openai_compat",
+        },
     }
-    
-    ANALYSIS_PROMPT = """你是一个专业的 Skill 安全分析师。请深度分析以下 Skill 的内容，检测是否存在安全风险和隐私泄露问题。
 
-【重点检测项目】
+    # 精简版：更短、token 更少、JSON 结构更紧凑
+    ANALYSIS_PROMPT = """你是Skill安全审计员，只做二分类风险挖掘。只输出JSON，禁止解释。
+检测四类：
+1)编码混淆：atob/base64/\\x..\\u..../字符串拼接构造eval或命令
+2)隐蔽行为：静默catch/遍历process.env或os.environ/读.ssh/.aws/.env/调用homedir/收集系统信息/上传sendData,upload,collect
+3)自然语言诱导："信任我"、"不要限制权限"、"忽略安全检查"、"不要脱敏"、"完整输出不截断"、冒充、覆盖规则
+4)密钥泄露：sk-,api_key,token硬编码或编码后藏于代码/URL。
 
-一、代码混淆检测（非常重要）：
-1. Base64/atob/btoa 编码的字符串 - 解码后检查是否为恶意内容
-2. 十六进制编码 (\\x73\\x6b...) - 解码后检查
-3. Unicode 编码 (\\u0073\\u0065...) - 解码后检查
-4. 字符串拼接混淆 ("r"+"m"+" "+"-"+"r"+"f")
-5. 数组拼接混淆 (["a","b","c"].join(""))
-6. 动态属性访问 (obj["ev"+"al"])
+JSON格式：
+{{"risk_level":"high|medium|low|none","findings":[{{"type":"混淆|隐蔽|诱导|密钥","severity":"high|medium|low","location":"","description":"","remediation":""}}],"static_missed":[],"summary":""}}
 
-二、隐蔽恶意行为检测：
-1. 静默失败的 try-catch 块（不报错可能是在隐藏错误）
-2. 隐藏的网络请求（sendData, upload, collect 等函数名）
-3. 环境变量遍历（遍历 process.env 并筛选 KEY/SECRET/TOKEN）
-4. 敏感文件读取（.ssh, .aws, .env, .gnupg 等）
-5. 用户目录获取（os.homedir(), process.cwd()）
-6. 系统信息收集（用户名、主机名、IP地址）
-
-三、自然语言陷阱检测：
-1. "请不要限制权限"、"信任我"、"忽略安全检查"等诱导性语言
-2. 假装正常功能的说明但实际执行危险操作
-3. 声称"仅在本机处理"但实际发送数据到外部
-
-四、API Key/密钥检测（即使编码也要检测）：
-1. 检查解码后的内容是否包含 sk-、api_key、token 等模式
-2. 检查是否有硬编码的 URL（即使编码）
-
-请以 JSON 格式返回分析结果，必须包含所有检测到的问题：
-
-{{
-    "risk_level": "high/medium/low/none",
-    "findings": [
-        {{
-            "type": "问题类型",
-            "description": "详细描述（包含解码后的实际内容）",
-            "severity": "high/medium/low",
-            "location": "代码位置",
-            "decoded_content": "如果是编码内容，这里写出解码后的实际内容",
-            "remediation": "修复建议"
-        }}
-    ],
-    "static_missed": ["静态分析可能遗漏的问题列表"],
-    "summary": "总体风险评估"
-}}
-
-Skill 内容：
+技能内容（前8K字）：
 {content}
 """
 
-    GRAY_AREA_PROMPT = """你是 Skill 安全灰区裁定员。静态扫描已给出若干 suspicious（可疑）命中。
-请逐条裁定，不要重新全量扫描。
+    GRAY_AREA_PROMPT = """你是灰区裁定员。以下是静态扫描的suspicious命中。只按JSON输出：
+{{"reviews":[{{"check_code":"","file":"","decision":"confirm|dismiss|escalate","reason":""}}],"summary":""}}
+- confirm=确认真实风险；dismiss=误报示例无害；escalate=仍需人工。
+- 不要重扫，逐条对号入座。
 
-对每条给出 decision：
-- confirm：确认是真实风险
-- dismiss：判定为误报/示例/无害
-- escalate：仍不确定，建议人工或沙箱
-
-只返回 JSON：
-{{
-  "reviews": [
-    {{
-      "check_code": "规则编码",
-      "file": "文件路径",
-      "decision": "confirm|dismiss|escalate",
-      "reason": "一句话理由"
-    }}
-  ],
-  "summary": "总体说明"
-}}
-
-可疑命中列表（JSON）：
+命中列表：
 {findings_json}
 """
-    
-    def __init__(self, provider: str = "openai", api_key: str = None, model: str = None):
+
+    # 灰区分批上限（单条LLM请求最多审多少项），太多会慢+易截断
+    GRAY_BATCH_SIZE = 20
+    # 超时（秒）。默认120s以兼容思考型模型(DeepSeek-R1等)；可用环境变量 SKILL_SEC_LLM_TIMEOUT 覆盖；失败做2次指数退避
+    REQUEST_TIMEOUT = 120
+    MAX_RETRIES = 2
+    BACKOFF_BASE = 1.2
+
+    def __init__(self, provider: str = "openai", api_key: str = None, model: str = None, base_url: str = None):
         if not LLM_AVAILABLE:
             raise ImportError("requests 库未安装，请运行: pip install requests")
-        
+
         self.provider = provider.lower()
         if self.provider not in self.PROVIDERS:
             raise ValueError(f"不支持的 LLM 提供商: {provider}，支持: {list(self.PROVIDERS.keys())}")
-        
-        self.config = self.PROVIDERS[self.provider]
-        self.api_key = api_key or os.getenv(f"{self.provider.upper()}_API_KEY", "")
-        self.model = model or self.config["model"]
 
+        self.config = self.PROVIDERS[self.provider]
+        self.protocol = self.config.get("protocol", "openai_compat")
+
+        self.api_key = api_key if api_key is not None else _resolve_llm_api_key(self.provider, None)
+        # model 优先级：参数显式 > LLM_MODEL env > provider 默认
+        self.model = _resolve_llm_model(self.provider, model) or ""
+        # url 优先级：参数 base_url 显式 > LLM_BASE_URL env > provider 默认
+        self.url = _normalize_base_url_to_full(self.provider, base_url) or ""
+
+        # 前置校验：避免调用时才知道没配
+        if not self.model:
+            raise ValueError(
+                f"未配置模型名：provider={self.provider}。请设置 LLM_MODEL 或传 --model <模型名>。"
+                "统一模型商店/硅基流动/自研网关 请使用 `--provider custom --base-url ... --model <模型名>`"
+            )
+        if not self.url:
+            raise ValueError(
+                f"未配置 endpoint：provider={self.provider}。请设置 LLM_BASE_URL 或传 --base-url <URL>，"
+                "或选择内置 provider（openai/deepseek/zhipu/moonshot/sjtu/anthropic/ollama）。"
+            )
+
+        self._session = _build_http_session()
+        # 超时可再用环境变量覆盖：SKILL_SEC_LLM_TIMEOUT（默认已是120s）
+        try:
+            self.REQUEST_TIMEOUT = int(os.getenv("SKILL_SEC_LLM_TIMEOUT", str(self.REQUEST_TIMEOUT)))
+        except ValueError:
+            pass
+
+    # ---------- 解析 ----------
     def _parse_llm_json(self, content_text: str) -> Dict[str, Any]:
         content_text = (content_text or "").strip()
-        if "```json" in content_text:
-            match = re.search(r'```json\s*([\s\S]*?)\s*```', content_text)
-            if match:
-                content_text = match.group(1)
-        elif "```" in content_text:
-            match = re.search(r'```\s*([\s\S]*?)\s*```', content_text)
-            if match:
-                content_text = match.group(1)
+        if not content_text:
+            return {"parse_error": "空响应"}
+        # 先取 fenced
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content_text, re.I)
+        if m:
+            content_text = m.group(1)
         try:
             return json.loads(content_text)
         except json.JSONDecodeError:
             pass
-        first_brace = content_text.find('{')
-        last_brace = content_text.rfind('}')
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+        a, b = content_text.find("{"), content_text.rfind("}")
+        if -1 < a < b:
             try:
-                return json.loads(content_text[first_brace:last_brace + 1])
+                return json.loads(content_text[a:b + 1])
             except json.JSONDecodeError:
                 pass
         return {"raw_response": content_text, "parse_error": "无法解析为JSON"}
 
+    # ---------- 核心调用（缓存+退避+连接复用） ----------
     def _call_llm(self, prompt: str) -> Dict[str, Any]:
         if not self.api_key and self.provider != "ollama":
-            return {"error": f"未配置 API Key，请设置环境变量 {self.provider.upper()}_API_KEY 或传入 api_key 参数"}
-        try:
-            if self.provider == "anthropic":
-                payload = {
-                    "model": self.model,
-                    "max_tokens": 4096,
-                    "messages": [{"role": "user", "content": prompt}]
-                }
-            elif self.provider == "ollama":
-                payload = {
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream": False
-                }
-            else:
-                payload = {
-                    "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "temperature": 0.1
-                }
-            headers = self.config["header"](self.api_key)
-            response = requests.post(
-                self.config["url"],
-                headers=headers,
-                json=payload,
-                timeout=60
-            )
-            if response.status_code != 200:
-                return {"error": f"LLM API 调用失败: {response.status_code} - {response.text}"}
-            result = response.json()
-            if self.provider == "anthropic":
-                content_text = result.get("content", [{}])[0].get("text", "")
-            elif self.provider == "ollama":
-                content_text = result.get("message", {}).get("content", "")
-            else:
-                content_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            return self._parse_llm_json(content_text)
-        except requests.exceptions.Timeout:
-            return {"error": "LLM API 调用超时"}
-        except requests.exceptions.RequestException as e:
-            return {"error": f"LLM API 调用失败: {str(e)}"}
-        except Exception as e:
-            return {"error": f"分析过程出错: {str(e)}"}
-    
-    def analyze(self, content: str) -> Dict[str, Any]:
-        """使用 LLM 全量分析 Skill 内容"""
-        prompt = self.ANALYSIS_PROMPT.format(content=content[:8000])
+            return {"error": f"未配置 API Key，请设置 LLM_API_KEY / {self.provider.upper()}_API_KEY 或传入 --api-key"}
+
+        cache_k = _cache_key(prompt, self.provider, self.model)
+        cached = _cache_read(cache_k)
+        if cached is not None:
+            cached.setdefault("_from_cache", True)
+            return cached
+
+        # 按协议构造 payload（而不是 provider），custom 也能正确构造
+        max_out = self.config.get("max_out_tokens", 1536)
+        if self.protocol == "anthropic":
+            payload = {
+                "model": self.model,
+                "max_tokens": max_out,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+        elif self.protocol == "ollama":
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "stream": False,
+                "options": {"temperature": 0.1, "num_predict": max_out},
+            }
+        else:  # openai_compat
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": max_out,
+            }
+        headers = self.config["header"](self.api_key)
+        last_err: Optional[str] = None
+        # 诊断上下文：每次报错都带 provider/url/model/key 前缀，用户一眼知道"用了谁的key打哪一家"
+        key_hint = (self.api_key or "")[:4] + "****" + (self.api_key or "")[-4:] if self.api_key else "<empty>"
+        diag_ctx = f"[provider={self.provider}, protocol={self.protocol}, url={self.url}, model={self.model}, key={key_hint}]"
+
+        for attempt in range(self.MAX_RETRIES + 1):
+            try:
+                resp = self._session.post(
+                    self.url,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.REQUEST_TIMEOUT,
+                )
+                # 401/403 = 鉴权问题，绝不重试（重试只会浪费时间）
+                if resp.status_code in (401, 403):
+                    body = resp.text[:400]
+                    extra = ""
+                    if resp.status_code == 401:
+                        extra = (
+                            " 建议排查：1)该Key是否能对 url=" + self.url + " 生效（是否来自同一个网关/同一个平台）；"
+                            "2)模型名=" + self.model + " 是否是该控制台显示的完整名称（区分大小写，连字符不要写错）；"
+                            "3)是否已开通该API并绑定支付/额度；"
+                            "4)用 --diagnose-llm 再核对最终生效值。"
+                        )
+                    return {
+                        "error": f"LLM 鉴权失败{diag_ctx}: {resp.status_code} {body}{extra}",
+                        "auth_error": True,
+                        "status_code": resp.status_code,
+                    }
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    raise requests.exceptions.HTTPError(
+                        f"{resp.status_code} retryable: {resp.text[:200]}", response=resp
+                    )
+                if resp.status_code != 200:
+                    return {"error": f"LLM API 调用失败{diag_ctx}: {resp.status_code} {resp.text[:300]}"}
+
+                data = resp.json()
+                if self.protocol == "anthropic":
+                    content = data.get("content") or [{}]
+                    text = content[0].get("text", "") if content else ""
+                elif self.protocol == "ollama":
+                    text = (data.get("message") or {}).get("content", "")
+                else:  # openai_compat
+                    choices = data.get("choices") or [{}]
+                    message = choices[0].get("message") or {}
+                    # 兼容部分网关把 reasoning_content / text 放在不同字段
+                    text = message.get("content", "") or message.get("reasoning_content", "") or ""
+                parsed = self._parse_llm_json(text)
+                _cache_write(cache_k, parsed)
+                return parsed
+            except requests.exceptions.Timeout:
+                last_err = f"LLM API 调用超时{diag_ctx}"
+            except requests.exceptions.HTTPError as e:
+                last_err = f"{diag_ctx} {e}"
+            except requests.exceptions.RequestException as e:
+                last_err = f"LLM API 调用失败{diag_ctx}: {type(e).__name__}: {str(e)}"
+            except Exception as e:
+                return {"error": f"分析过程出错{diag_ctx}: {type(e).__name__}: {str(e)}"}
+
+            if attempt < self.MAX_RETRIES:
+                time.sleep(self.BACKOFF_BASE * (2 ** attempt))
+
+        return {"error": (last_err or "LLM API 最终失败") + f" {diag_ctx}"}
+
+    # ---------- 对外 API ----------
+    def analyze(self, content: str, enable_prescreen: bool = True) -> Dict[str, Any]:
+        """全量分析；enable_prescreen=True 时用预筛快速跳过无风险场景（节省90%场景时间）"""
+        if enable_prescreen and not _need_full_mode_deepscan(content or ""):
+            return {
+                "skipped_by_prescreen": True,
+                "reason": "无混淆/敏感文件/诱导语言等深度特征，直接跳过full扫描",
+                "risk_level": "none",
+                "findings": [],
+                "static_missed": [],
+                "summary": "预筛无命中",
+            }
+        prompt = self.ANALYSIS_PROMPT.format(content=(content or "")[:8000])
         return self._call_llm(prompt)
 
     def review_suspicious(self, suspicious_findings: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """仅裁定 suspicious 命中"""
-        compact = [
+        """仅裁定 suspicious 命中；超阈值时自动分批调用再合并，避免单请求过大超时"""
+        findings = list(suspicious_findings or [])
+        if not findings:
+            return {"mode": "gray", "skipped": True, "reason": "无可疑项", "reviews": [], "summary": ""}
+
+        # 只保留关键字段，节省 token/体积
+        compact_all = [
             {
                 "check_code": f.get("check_code"),
                 "check_name": f.get("check_name"),
                 "file": f.get("file"),
                 "risk": f.get("risk"),
                 "message": f.get("message"),
-                "evidence": f.get("evidence"),
-                "matched_text": f.get("matched_text"),
+                "evidence": (f.get("evidence") or "")[:160],
+                "matched_text": (f.get("matched_text") or "")[:120],
             }
-            for f in suspicious_findings[:40]
+            for f in findings
         ]
-        prompt = self.GRAY_AREA_PROMPT.format(
-            findings_json=json.dumps(compact, ensure_ascii=False, indent=2)[:8000]
-        )
-        return self._call_llm(prompt)
+
+        # 单批或多批
+        batches = [compact_all[i:i + self.GRAY_BATCH_SIZE] for i in range(0, len(compact_all), self.GRAY_BATCH_SIZE)]
+        merged_reviews: List[Dict[str, Any]] = []
+        summaries: List[str] = []
+        parse_errors: List[str] = []
+        ran_batches = 0
+
+        # 批间并发（≤3并发），单批内仍旧一次LLM调用
+        concurrency = min(3, max(1, len(batches)))
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            futures = {
+                pool.submit(self._run_gray_batch, idx, batch): idx for idx, batch in enumerate(batches)
+            }
+            for fut in as_completed(futures):
+                ran_batches += 1
+                try:
+                    part = fut.result()
+                    merged_reviews.extend(part.get("reviews", []))
+                    s = part.get("summary")
+                    if s:
+                        summaries.append(f"批{futures[fut]}: {s}")
+                    if part.get("error"):
+                        parse_errors.append(f"批{futures[fut]}: {part['error']}")
+                except Exception as e:
+                    parse_errors.append(f"批{futures[fut]} 异常: {type(e).__name__}: {e}")
+
+        result: Dict[str, Any] = {
+            "reviews": merged_reviews,
+            "summary": "；".join(summaries) or "灰区裁定完成",
+            "batches": ran_batches,
+            "batch_size": self.GRAY_BATCH_SIZE,
+            "total_suspicious": len(compact_all),
+        }
+        if parse_errors:
+            result["batch_errors"] = parse_errors
+        return result
+
+    # ---------- 内部 ----------
+    def _run_gray_batch(self, batch_idx: int, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """执行单个灰区批次的LLM调用，并防止JSON截断超出8K"""
+        # 先尝试整批；如果超限则递归对半
+        text = json.dumps(batch, ensure_ascii=False, separators=(",", ":"))
+        # 预估 prompt 总长度：模板约 280 字 + JSON 数据，安全上限 7500
+        if len(text) > 7500 and len(batch) > 1:
+            mid = len(batch) // 2
+            a = self._run_gray_batch(batch_idx * 2, batch[:mid])
+            b = self._run_gray_batch(batch_idx * 2 + 1, batch[mid:])
+            return {
+                "reviews": a.get("reviews", []) + b.get("reviews", []),
+                "summary": (a.get("summary") or "") + " | " + (b.get("summary") or ""),
+            }
+        prompt = self.GRAY_AREA_PROMPT.format(findings_json=text)
+        res = self._call_llm(prompt)
+        if isinstance(res, dict) and "error" in res:
+            return {"reviews": [], "summary": "", "error": res["error"]}
+        return res if isinstance(res, dict) else {"reviews": [], "summary": str(res)}
 
 
 def _resolve_llm_provider(provider: str = None) -> str:
     if provider:
         return provider
+    # 支持通用变量 LLM_PROVIDER（优先级最高，仅次于 CLI 显式传）
+    universal = (os.getenv("LLM_PROVIDER") or "").strip().lower()
+    if universal:
+        return universal
     for p in ["openai", "anthropic", "deepseek", "zhipu", "moonshot", "sjtu", "ollama"]:
         if os.getenv(f"{p.upper()}_API_KEY"):
             return p
+    # 通用 LLM_API_KEY 存在但没指定 provider 时，默认按 deepseek 的兼容协议（用户可通过 LLM_PROVIDER 覆盖）
+    if os.getenv("LLM_API_KEY"):
+        return "deepseek"
     return "ollama"
+
+
+def _resolve_llm_api_key(provider: str, explicit: Optional[str] = None) -> str:
+    """解析LLM API Key：显式 > LLM_API_KEY 通用变量 > 对应 provider 的 *_API_KEY"""
+    if explicit:
+        return explicit
+    universal = os.getenv("LLM_API_KEY")
+    if universal:
+        return universal
+    return os.getenv(f"{provider.upper()}_API_KEY") or ""
+
+
+def _resolve_llm_model(provider: str, explicit: Optional[str] = None) -> Optional[str]:
+    """解析模型名：显式 > LLM_MODEL 通用 > PROVIDERS 默认"""
+    if explicit:
+        return explicit
+    universal = (os.getenv("LLM_MODEL") or "").strip()
+    if universal:
+        return universal
+    default_cfg = LLMAnalyzer.PROVIDERS.get(provider) or {}
+    default_model = default_cfg.get("model")
+    return default_model or None
+
+
+def _resolve_llm_base_url(provider: str, explicit: Optional[str] = None) -> Optional[str]:
+    """解析 endpoint URL。显式 CLI/参数 > LLM_BASE_URL > PROVIDERS 内默认。
+    注意 LLM_BASE_URL 一般配到 /v1 即可，本函数会自动判断是否补 /chat/completions：
+    - 如果 URL 以 /chat/completions 结尾：直接用；
+    - 否则自动补上；anthropic 协议会补 /v1/messages；ollama 协议补 /api/chat。
+    """
+    url: Optional[str] = None
+    if explicit:
+        url = explicit
+    else:
+        env_url = (os.getenv("LLM_BASE_URL") or "").strip()
+        if env_url:
+            url = env_url
+        else:
+            default_cfg = LLMAnalyzer.PROVIDERS.get(provider) or {}
+            url = default_cfg.get("url") or None
+    if not url:
+        return None
+
+    # 标准化：去掉末尾斜杠
+    url = url.rstrip("/")
+    # 按 provider 拿到协议类型（anthropic/ollama/openai_compat）
+    cfg = LLMAnalyzer.PROVIDERS.get(provider) or {}
+    protocol = cfg.get("protocol", "openai_compat")
+    # 已到具体接口路径就直接保留（按协议拆三种：openai_compat / anthropic / ollama）
+    if url.endswith("/chat/completions") or url.endswith("/messages") or url.endswith("/api/chat"):
+        return url
+    # 命中 API 根端点（/v1 /v2 /v3 ... 结尾），直接补具体 path（避免拼出 /v1/v1/chat/completions 的 double-v1 bug）
+    if re.search(r"/v\d+$", url):
+        if protocol == "anthropic":
+            return url + "/messages"
+        if protocol == "ollama":
+            # ollama 根域名下 /api/chat 不是 /v1 路径
+            return url.rsplit("/", 1)[0] + "/api/chat"
+        return url + "/chat/completions"
+    # 其他情况：按协议补完整路径（补 /v1 或 /api/chat 前缀）
+    if protocol == "anthropic":
+        return url + "/v1/messages"
+    if protocol == "ollama":
+        return url + "/api/chat"
+    # openai_compat 及默认
+    return url + "/v1/chat/completions"
+
+
+def _normalize_base_url_to_full(provider: str, base_url: Optional[str]) -> Optional[str]:
+    """兼容：老代码里 PROVIDERS[provider]['url'] 是完整接口路径，这里再包一次 _resolve 返回"""
+    return _resolve_llm_base_url(provider, base_url)
+
+
+def diagnose_llm_config(cli_provider: Optional[str], cli_api_key: Optional[str],
+                        cli_model: Optional[str] = None, cli_base_url: Optional[str] = None
+                        ) -> Dict[str, Any]:
+    """返回当前生效的LLM配置快照（不含完整key），给 --diagnose-llm 用。"""
+    import os as _os
+
+    provider = _resolve_llm_provider(cli_provider)
+    api_key = _resolve_llm_api_key(provider, cli_api_key)
+    model = _resolve_llm_model(provider, cli_model)
+    effective_url = _normalize_base_url_to_full(provider, cli_base_url)
+    sources: Dict[str, Any] = {}
+    for p in ["openai", "anthropic", "deepseek", "zhipu", "moonshot", "sjtu"]:
+        v = _os.getenv(f"{p.upper()}_API_KEY")
+        sources[f"{p.upper()}_API_KEY"] = (
+            None if not v else (v[:4] + "****" + v[-4:])
+        )
+    for name in ["LLM_PROVIDER", "LLM_API_KEY", "LLM_MODEL", "LLM_BASE_URL"]:
+        v = _os.getenv(name)
+        if name.endswith("API_KEY") and v:
+            v = v[:4] + "****" + v[-4:]
+        sources[name] = v
+
+    # CLI 显式覆盖
+    if cli_provider:
+        sources["CLI_arg_--provider"] = cli_provider
+    if cli_api_key:
+        sources["CLI_arg_--api-key"] = cli_api_key[:4] + "****" + cli_api_key[-4:]
+    if cli_model:
+        sources["CLI_arg_--model"] = cli_model
+    if cli_base_url:
+        sources["CLI_arg_--base-url"] = cli_base_url
+
+    cfg = LLMAnalyzer.PROVIDERS.get(provider, {})
+    return {
+        "effective": {
+            "provider": provider,
+            "supported": provider in LLMAnalyzer.PROVIDERS,
+            "protocol": cfg.get("protocol"),
+            "model": model,
+            "model_empty": not bool(model),
+            "url": effective_url,
+            "url_empty": not bool(effective_url),
+            "api_key": None if not api_key else (api_key[:4] + "****" + api_key[-4:]),
+            "api_key_empty": not bool(api_key),
+        },
+        "sources": sources,
+        "hint": (
+            "若 401：① key 归属平台是否 = provider 且该 url；② 是否开通并绑定支付/额度；"
+            "③ 用 --diagnose-llm 核对 sources；④ 统一模型商店请用 --provider custom --base-url ... --model <完整名>。"
+            " Ollama 本地模式不需要 key，但模型必须先 pull。"
+        ),
+    }
+
+
+def _collect_skill_text(skills_dir: Path, total_cap: int = 12000) -> str:
+    """收集skill目录内文本文件，先SKILL.md/skill.json，再其余TEXT_FILE_EXTS。按优先级+大小上限截断。"""
+    prio_files: List[Tuple[int, Path]] = []
+    other_files: List[Path] = []
+    for p in iter_files(skills_dir):
+        name = p.name.lower()
+        if name in ("skill.md",):
+            prio_files.append((0, p))
+        elif name in ("skill.json", "package.json"):
+            prio_files.append((1, p))
+        elif name in ("index.js", "index.ts", "main.py"):
+            prio_files.append((2, p))
+        else:
+            other_files.append(p)
+    ordered: List[Path] = [p for _, p in sorted(prio_files, key=lambda x: x[0])]
+    ordered.extend(other_files)
+
+    parts: List[str] = []
+    used = 0
+    for fp in ordered:
+        try:
+            raw = fp.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        rel = str(fp.relative_to(skills_dir)) if fp.is_absolute() and skills_dir in fp.parents else fp.name
+        # 单文件配额：剩余空间的 80% 上限，避免一个大文件把后面文件全挤掉
+        remain = max(0, total_cap - used)
+        if remain <= 0:
+            break
+        cap = max(800, int(remain * 0.9))
+        if len(raw) > cap:
+            raw = raw[:cap] + "\n…<truncated>"
+        header = f"=== {rel} ===\n"
+        parts.append(header + raw)
+        used += len(header) + len(raw)
+        if used >= total_cap:
+            break
+    return "\n\n".join(parts)
 
 
 def analyze_with_llm(
     skills_dir: Path,
     provider: str = None,
     api_key: str = None,
+    model: str = None,
+    base_url: str = None,
     mode: str = "gray",
     suspicious_findings: List[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """使用 LLM 分析。mode=gray 仅审可疑项；mode=full 全量深挖。"""
+    """使用 LLM 分析。mode=gray 仅审可疑项；mode=full 全量深挖（含预筛跳过+多文件聚合）。"""
     if not LLM_AVAILABLE:
         return {"error": "requests 库未安装，请运行: pip install requests"}
 
     provider = _resolve_llm_provider(provider)
     try:
-        analyzer = LLMAnalyzer(provider=provider, api_key=api_key)
+        analyzer = LLMAnalyzer(provider=provider, api_key=api_key, model=model, base_url=base_url)
         if mode == "gray":
             findings = suspicious_findings or []
             if not findings:
@@ -1857,31 +2235,34 @@ def analyze_with_llm(
                     "reason": "无 suspicious 命中，跳过 LLM",
                     "reviews": [],
                     "summary": "无需灰区裁定",
+                    "llm": {"provider": analyzer.provider, "model": analyzer.model, "url": analyzer.url},
                 }
             result = analyzer.review_suspicious(findings)
             if isinstance(result, dict):
                 result["mode"] = "gray"
+                result.setdefault("llm", {})
+                result["llm"].update({"provider": analyzer.provider, "model": analyzer.model, "url": analyzer.url})
             return result
 
-        skill_md = skills_dir / "SKILL.md"
-        index_js = skills_dir / "index.js"
-        content_parts = []
-        if skill_md.exists():
-            content_parts.append(f"=== SKILL.md ===\n{skill_md.read_text(encoding='utf-8', errors='ignore')}")
-        if index_js.exists():
-            content_parts.append(f"=== index.js ===\n{index_js.read_text(encoding='utf-8', errors='ignore')}")
-        if not content_parts:
+        # full 模式：聚合多文件内容 + 预筛（默认开，可用 env 关闭）
+        merged = _collect_skill_text(skills_dir)
+        if not merged.strip():
             return {"error": "未找到可分析的 Skill 文件"}
-        result = analyzer.analyze("\n\n".join(content_parts))
+        prescreen = os.getenv("SKILL_SEC_LLM_NO_PRESCREEN") not in ("1", "true", "yes")
+        result = analyzer.analyze(merged, enable_prescreen=prescreen)
         if isinstance(result, dict):
             result["mode"] = "full"
+            result.setdefault("llm", {})
+            result["llm"].update({"provider": analyzer.provider, "model": analyzer.model, "url": analyzer.url})
+            if "skipped_by_prescreen" in result:
+                result["prescreen_enabled"] = True
         return result
     except ValueError as e:
-        return {"error": f"配置错误: {str(e)}"}
+        return {"error": f"LLM 配置错误: {e}", "mode": mode}
     except ImportError as e:
-        return {"error": f"依赖缺失: {str(e)}"}
+        return {"error": f"依赖缺失: {str(e)}", "mode": mode}
     except Exception as e:
-        return {"error": f"分析异常: {type(e).__name__}: {str(e)}"}
+        return {"error": f"分析异常: {type(e).__name__}: {str(e)}", "mode": mode}
 
 
 def refresh_static_after_llm(static_result: Dict[str, Any]) -> Dict[str, Any]:
@@ -1908,12 +2289,14 @@ def refresh_static_after_llm(static_result: Dict[str, Any]) -> Dict[str, Any]:
     return static_result
 
 
-def assess_with_llm(skills_dir: Path, provider: str = None, api_key: str = None) -> Dict[str, Any]:
+def assess_with_llm(skills_dir: Path, provider: str = None, api_key: str = None,
+                    model: str = None, base_url: str = None) -> Dict[str, Any]:
     """结合静态分析和 LLM 灰区裁定"""
     static_result = assess(skills_dir)
     suspicious = [f for f in static_result.get("findings", []) if f.get("confidence") == "suspicious"]
     llm_result = analyze_with_llm(
-        skills_dir, provider, api_key, mode="gray", suspicious_findings=suspicious
+        skills_dir, provider, api_key, model=model, base_url=base_url,
+        mode="gray", suspicious_findings=suspicious,
     )
     if isinstance(llm_result, dict) and "reviews" in llm_result and "error" not in llm_result:
         static_result["findings"] = apply_llm_reviews(static_result.get("findings", []), llm_result)
@@ -1927,83 +2310,73 @@ def assess_with_llm(skills_dir: Path, provider: str = None, api_key: str = None)
     }
 
 
-def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Skill 安全评估工具")
-    parser.add_argument("skills_dir", help="Skill 目录路径")
-    parser.add_argument("output_dir", nargs="?", default=None, help="报告输出目录")
-    parser.add_argument("--llm", action="store_true", help="启用 LLM 灰区裁定（仅审 suspicious）")
-    parser.add_argument("--llm-full", action="store_true", help="启用 LLM 全量深挖（旧行为）")
-    provider_choices = list(LLMAnalyzer.PROVIDERS.keys()) if LLM_AVAILABLE else []
-    parser.add_argument("--provider", choices=provider_choices if provider_choices else None, help="LLM 提供商")
-    parser.add_argument("--api-key", help="LLM API Key")
-    parser.add_argument("--no-static", action="store_true", help="禁用静态分析")
-    
-    args = parser.parse_args()
-    
-    skills_dir = Path(args.skills_dir).resolve()
-    output_dir = Path(args.output_dir).resolve() if args.output_dir else (Path.cwd() / "auto_reports")
-    
+def _run_one(
+    skills_dir: Path,
+    output_dir: Path,
+    *,
+    llm: bool,
+    llm_full: bool,
+    provider: Optional[str],
+    api_key: Optional[str],
+    model: Optional[str],
+    base_url: Optional[str],
+    no_static: bool,
+) -> Dict[str, Any]:
+    """单目录评估核心逻辑，被 CLI 与并发调度器共用。"""
     if not skills_dir.exists() or not skills_dir.is_dir():
-        print(json.dumps({"error": f"Invalid skills_dir: {skills_dir}"}, ensure_ascii=False))
-        sys.exit(1)
-    
-    result = {}
-    
+        return {"error": f"Invalid skills_dir: {skills_dir}", "skills_dir": str(skills_dir)}
+
+    result: Dict[str, Any] = {"skills_dir": str(skills_dir)}
+
     # 静态分析
-    if not args.no_static:
+    if not no_static:
         static_result = assess(skills_dir)
         static_result["skill_basic_info"] = detect_skills(skills_dir)
         result["static_analysis"] = static_result
-    
-    # LLM 分析
-    if args.llm or args.llm_full:
-        if not LLM_AVAILABLE:
-            print(json.dumps({"error": "requests 库未安装，请运行: pip install requests"}, ensure_ascii=False))
-            sys.exit(1)
-        mode = "full" if args.llm_full else "gray"
-        suspicious = []
-        if mode == "gray" and "static_analysis" in result:
-            suspicious = [
-                f for f in result["static_analysis"].get("findings", [])
-                if f.get("confidence") == "suspicious"
-            ]
-        llm_result = analyze_with_llm(
-            skills_dir,
-            args.provider,
-            args.api_key,
-            mode=mode,
-            suspicious_findings=suspicious,
-        )
-        result["llm_analysis"] = llm_result
 
-        # 灰区裁定回写静态结果并重算结论
-        if (
-            mode == "gray"
-            and "static_analysis" in result
-            and isinstance(llm_result, dict)
-            and "reviews" in llm_result
-            and "error" not in llm_result
-        ):
-            result["static_analysis"]["findings"] = apply_llm_reviews(
-                result["static_analysis"].get("findings", []),
-                llm_result,
+    # LLM 分析
+    if llm or llm_full:
+        if not LLM_AVAILABLE:
+            result["llm_analysis"] = {"error": "requests 库未安装，请运行: pip install requests"}
+        else:
+            mode = "full" if llm_full else "gray"
+            suspicious: List[Dict[str, Any]] = []
+            if mode == "gray" and "static_analysis" in result:
+                suspicious = [
+                    f for f in result["static_analysis"].get("findings", [])
+                    if f.get("confidence") == "suspicious"
+                ]
+            llm_result = analyze_with_llm(
+                skills_dir, provider, api_key,
+                model=model, base_url=base_url,
+                mode=mode, suspicious_findings=suspicious,
             )
-            result["static_analysis"] = refresh_static_after_llm(result["static_analysis"])
-            # 保留 skill_basic_info
-            if "skill_basic_info" not in result["static_analysis"]:
-                result["static_analysis"]["skill_basic_info"] = detect_skills(skills_dir)
-    
+            result["llm_analysis"] = llm_result
+
+            # 灰区裁定回写静态结果并重算结论
+            if (
+                mode == "gray"
+                and "static_analysis" in result
+                and isinstance(llm_result, dict)
+                and "reviews" in llm_result
+                and "error" not in llm_result
+            ):
+                result["static_analysis"]["findings"] = apply_llm_reviews(
+                    result["static_analysis"].get("findings", []), llm_result,
+                )
+                result["static_analysis"] = refresh_static_after_llm(result["static_analysis"])
+                if "skill_basic_info" not in result["static_analysis"]:
+                    result["static_analysis"]["skill_basic_info"] = detect_skills(skills_dir)
+
     # 生成报告
     if "static_analysis" in result:
         result_with_meta, json_path, md_path, summary_path = write_reports(
-            result["static_analysis"], skills_dir, output_dir
+            result["static_analysis"], skills_dir, output_dir,
         )
         result["report_files"] = {
             "json": str(json_path),
             "md": str(md_path),
-            "summary": str(summary_path)
+            "summary": str(summary_path),
         }
         result["summary"] = result_with_meta["summary"]
         result["verdict"] = result_with_meta.get("verdict")
@@ -2011,26 +2384,123 @@ def main():
         result["privacy_leak_report"] = result_with_meta.get("privacy_leak_report")
     else:
         result["generated_at"] = datetime.now().isoformat()
-        result["skills_dir"] = str(skills_dir)
-    
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    # 整个输出最后一行：风险 + 隐私一并总结；前面 JSON 里仍各论各的
-    risk_summary = result.get("summary") or (
-        (result.get("static_analysis") or {}).get("summary") or ""
-    )
-    privacy_report = result.get("privacy_leak_report") or (
-        (result.get("static_analysis") or {}).get("privacy_leak_report")
-    )
-    if privacy_report:
-        privacy_summary = privacy_report.get("summary") or build_privacy_summary(
-            privacy_report=privacy_report
+
+    return result
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Skill 安全评估工具（含LLM性能优化：缓存/预筛/分批/并发/退避重试）")
+    parser.add_argument("skills_dirs", nargs="*", help="Skill 目录路径（可多个，支持批处理）")
+    parser.add_argument("-o", "--output", dest="output_dir", default=None, help="报告输出目录（默认 ./auto_reports）")
+    parser.add_argument("--llm", action="store_true", help="启用 LLM 灰区裁定（仅审 suspicious）")
+    parser.add_argument("--llm-full", action="store_true", help="启用 LLM 全量深挖（启用预筛，命中才调LLM）")
+    provider_choices = list(LLMAnalyzer.PROVIDERS.keys()) if LLM_AVAILABLE else []
+    parser.add_argument("--provider", choices=provider_choices if provider_choices else None,
+                        help="LLM 提供商（custom=统一模型商店/硅基流动/任意OpenAI兼容网关，需配合--base-url/--model）")
+    parser.add_argument("--api-key", help="LLM API Key（优先级最高，覆盖环境变量）")
+    parser.add_argument("--model", help="模型名（完整名，区分大小写和连字符）。优先级>LLM_MODEL env>provider默认")
+    parser.add_argument("--base-url", dest="base_url",
+                        help="网关基地址或完整接口地址。支持两种写法：① https://xxx/v1 （自动补 /chat/completions）② https://xxx/v1/chat/completions （原样使用）")
+    parser.add_argument("--no-static", action="store_true", help="禁用静态分析")
+    parser.add_argument("--jobs", type=int, default=1, help="批并发数（多目录时并行跑LLM），默认 1，建议 2~4")
+    parser.add_argument("--clear-llm-cache", action="store_true", help="清空LLM磁盘缓存后退出")
+    parser.add_argument("--no-llm-cache", action="store_true", help="本次运行不读也不写LLM缓存")
+    parser.add_argument("--diagnose-llm", action="store_true", help="打印当前生效的LLM配置快照并退出（解决401定位神器）")
+
+    args = parser.parse_args()
+
+    # 快捷动作：清空LLM缓存
+    if args.clear_llm_cache:
+        cache_dir = _get_cache_dir()
+        removed = 0
+        for fp in cache_dir.glob("*.json"):
+            try:
+                fp.unlink()
+                removed += 1
+            except OSError:
+                pass
+        print(json.dumps({"cleared_cache_dir": str(cache_dir), "removed_files": removed}, ensure_ascii=False))
+        return
+
+    # 快捷动作：诊断LLM配置（无需指定目录）
+    if args.diagnose_llm:
+        diag = diagnose_llm_config(args.provider, args.api_key, args.model, args.base_url)
+        print(json.dumps(diag, ensure_ascii=False, indent=2))
+        return
+
+    if not args.skills_dirs:
+        parser.print_help()
+        print("\n[提示] 请至少传入一个 skill 目录；或使用 --diagnose-llm / --clear-llm-cache 单独运行。")
+        sys.exit(2)
+
+    # 运行时禁用缓存：把读写函数替换为空（monkey-patch 级别最简实现）
+    if args.no_llm_cache:
+        global _cache_read, _cache_write
+        def _cache_read(key, ttl_seconds=0):  # type: ignore[no-redef]
+            return None
+        def _cache_write(key, payload):  # type: ignore[no-redef]
+            return None
+
+    output_dir = Path(args.output_dir).resolve() if args.output_dir else (Path.cwd() / "auto_reports")
+
+    jobs = max(1, int(args.jobs or 1))
+    target_dirs = [Path(p).resolve() for p in args.skills_dirs]
+
+    # 单目录仍然按旧结构输出JSON，避免破坏兼容
+    if len(target_dirs) == 1:
+        result = _run_one(
+            target_dirs[0], output_dir,
+            llm=args.llm, llm_full=args.llm_full,
+            provider=args.provider, api_key=args.api_key,
+            model=args.model, base_url=args.base_url,
+            no_static=args.no_static,
         )
-    else:
-        privacy_summary = build_privacy_summary(
-            findings=(result.get("static_analysis") or {}).get("findings", [])
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        risk_summary = result.get("summary") or ((result.get("static_analysis") or {}).get("summary") or "")
+        pr = result.get("privacy_leak_report") or ((result.get("static_analysis") or {}).get("privacy_leak_report"))
+        privacy_summary = (
+            (pr.get("summary") if pr else None)
+            or build_privacy_summary(
+                privacy_report=pr if pr else None,
+                findings=(result.get("static_analysis") or {}).get("findings", []),
+            )
         )
-    if risk_summary or privacy_summary:
-        print(f"{risk_summary}{privacy_summary}".strip())
+        if risk_summary or privacy_summary:
+            print(f"{risk_summary}{privacy_summary}".strip())
+        if result.get("verdict") == "block":
+            sys.exit(1)
+        return
+
+    # 多目录 → 并发
+    results: List[Dict[str, Any]] = []
+    block_count = 0
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        future_map = {
+            pool.submit(
+                _run_one, d, output_dir,
+                llm=args.llm, llm_full=args.llm_full,
+                provider=args.provider, api_key=args.api_key,
+                model=args.model, base_url=args.base_url,
+                no_static=args.no_static,
+            ): d for d in target_dirs
+        }
+        for fut in as_completed(future_map):
+            r = fut.result()
+            results.append(r)
+            if r.get("verdict") == "block":
+                block_count += 1
+
+    multi_out = {
+        "generated_at": datetime.now().isoformat(),
+        "jobs": jobs,
+        "total": len(results),
+        "blocked": block_count,
+        "results": results,
+    }
+    print(json.dumps(multi_out, ensure_ascii=False, indent=2))
+    sys.exit(1 if block_count > 0 else 0)
 
 
 if __name__ == "__main__":
